@@ -94,14 +94,14 @@ function heldBackLength(text: string): number {
   return longest;
 }
 
-function parseTraceStep(payload: string): TraceStep | null {
+function parseTraceStep(payload: string, fallbackIndex = 0): TraceStep | null {
   try {
     const value = JSON.parse(payload) as Partial<TraceStep>;
 
     if (!value || typeof value.title !== "string") return null;
 
     return {
-      n: typeof value.n === "number" ? value.n : 0,
+      n: typeof value.n === "number" ? value.n : fallbackIndex,
       stage: typeof value.stage === "string" ? value.stage : "step",
       status:
         value.status === "run" ||
@@ -121,6 +121,7 @@ function parseTraceStep(payload: string): TraceStep | null {
 
 export class StreamMarkerParser {
   private buffer = "";
+  private stepCount = 0;
 
   // Set once a terminal marker (meta/error) is seen: everything after it is payload.
   private terminal: { marker: string; payload: string } | null = null;
@@ -154,7 +155,8 @@ export class StreamMarkerParser {
         this.buffer = this.buffer.slice(newline + 1);
         this.inTrace = false;
 
-        const step = parseTraceStep(this.tracePayload);
+        this.stepCount += 1;
+        const step = parseTraceStep(this.tracePayload, this.stepCount);
         this.tracePayload = "";
         if (step) result.traces.push(step);
         continue;

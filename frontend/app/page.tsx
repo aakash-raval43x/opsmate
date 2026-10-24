@@ -1,4 +1,3 @@
-
 "use client";
 
 import {
@@ -83,18 +82,11 @@ const PROVIDER_LABELS: Record<string, string> = {
   "scope-gate": "Scope gate",
 };
 
-// Only stored cache layers count as cache hits.
-// COALESCED is shared in-flight work, not a stored cache hit.
-const HIT_LAYERS = new Set([
-  "L1_MEMORY",
-  "L2_POSTGRES",
-  "L2_SEMANTIC",
-]);
+const HIT_LAYERS = new Set(["L1_MEMORY", "L2_POSTGRES", "L2_SEMANTIC"]);
 
 const isCacheHit = (layer: string) => HIT_LAYERS.has(layer);
 
-const cacheLayerLabel = (layer: string) =>
-  LAYER_LABELS[layer] ?? layer;
+const cacheLayerLabel = (layer: string) => LAYER_LABELS[layer] ?? layer;
 
 const cacheProviderLabel = (provider: string) =>
   PROVIDER_LABELS[provider] ?? provider;
@@ -164,9 +156,7 @@ function latencyText(latency: LatencyInfo): string {
   return `Total ${latency.totalMs}ms`;
 }
 
-function parseServerTiming(
-  header: string | null
-): Record<string, number> {
+function parseServerTiming(header: string | null): Record<string, number> {
   const out: Record<string, number> = {};
 
   if (!header) return out;
@@ -183,12 +173,7 @@ function parseServerTiming(
 }
 
 // ============================================================
-// Live pipeline trace
-//
-// Every step the backend takes (query understood -> cache/tool decision ->
-// model answer -> done) arrives as a trace event inside the answer stream and
-// is rendered as a timeline, so the pipeline is visible WHILE it runs instead
-// of only as a final result. Parsing lives in lib/stream-parser.ts.
+// Pipeline trace labels
 // ============================================================
 
 const TRACE_STAGE_LABELS: Record<string, string> = {
@@ -353,6 +338,7 @@ function parseErrorInfo(raw: string): ErrorInfo {
 // ============================================================
 
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
   const [query, setQuery] = useState("");
   const [answer, setAnswer] = useState("");
   const [model, setModel] = useState("");
@@ -360,14 +346,18 @@ export default function Home() {
   const [error, setError] = useState("");
   const [wsStatus, setWsStatus] = useState("Connecting WebSocket...");
   const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [identity, setIdentity] = useState<{
+    name: string;
+    email: string;
+    role: string;
+  } | null>(null);
   const [cacheInfo, setCacheInfo] = useState<CacheInfo | null>(null);
   const [latency, setLatency] = useState<LatencyInfo | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState("");
   const [requestNumber, setRequestNumber] = useState<number | null>(null);
   const [trace, setTrace] = useState<TraceStep[]>([]);
 
-  const [currentUsage, setCurrentUsage] =
-    useState<UsageStats | null>(null);
+  const [currentUsage, setCurrentUsage] = useState<UsageStats | null>(null);
 
   const [totalUsage, setTotalUsage] = useState<UsageStats>({
     promptTokens: 0,
@@ -380,6 +370,102 @@ export default function Home() {
   const streamedAnswerRef = useRef("");
   const animationFrameRef = useRef<number | null>(null);
   const streamMetaRef = useRef<StreamMeta | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setMounted(true), 20);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  function updateIdentity(user: { name: string; email: string; role?: string }) {
+    setIdentity({
+      name: user.name,
+      email: user.email,
+      role: user.role ?? "user",
+    });
+  }
+
+  // Identity state now carries the verified role from /api/auth/me — admin
+  // users additionally get an "Admin panel" link in the header.
+
+  function getStoredToken(): string | null {
+    if (typeof window === "undefined") return null;
+    // sessionStorage is the canonical home (the login page writes there), with
+    // a localStorage fallback for tokens saved by older builds — migrated and
+    // cleaned up on the fly.
+    const token =
+      window.sessionStorage.getItem("opsmate_auth_token") ||
+      window.localStorage.getItem("opsmate_auth_token");
+    if (token) {
+      window.sessionStorage.setItem("opsmate_auth_token", token);
+      window.localStorage.removeItem("opsmate_auth_token");
+    }
+    return token;
+  }
+
+  async function signOut() {
+    const token = getStoredToken();
+    try {
+      if (token) {
+        await fetch("/api/auth/logout", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+    } catch {
+      // Logout is best-effort: the session is cleared below regardless.
+    }
+    window.sessionStorage.removeItem("opsmate_auth_token");
+    window.localStorage.removeItem("opsmate_auth_token");
+    setIdentity(null);
+    window.location.href = "/";
+  }
+
+  // ============================================================
+  // Logged-in identity (fetched from the backend only)
+  // ============================================================
+
+  useEffect(() => {
+    let alive = true;
+
+    async function fetchIdentity() {
+      const token = getStoredToken();
+
+      if (!token) {
+        setIdentity(null);
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/auth/me", {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
+        });
+
+        if (!res.ok) throw new Error("unauthorized");
+
+        const data = await res.json();
+
+        if (!alive) return;
+
+        updateIdentity(data.user)
+      } catch {
+        if (alive) setIdentity(null);
+      }
+    }
+
+    fetchIdentity();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function openAuthModal() {
+    const params = new URLSearchParams(window.location.search);
+    const next = params.get("next") || "/";
+    window.location.href = `/login?next=${encodeURIComponent(next)}`;
+  }
 
   function isCurrentRequest(request: ActiveRequest): boolean {
     return (
@@ -433,7 +519,7 @@ export default function Home() {
     request.controller.abort();
 
     if (request.reader) {
-      void request.reader.cancel().catch(() => {});
+      void request.reader.cancel().catch(() => { });
     }
 
     cancelAnswerFrame();
@@ -462,7 +548,7 @@ export default function Home() {
         request.controller.abort();
 
         if (request.reader) {
-          void request.reader.cancel().catch(() => {});
+          void request.reader.cancel().catch(() => { });
         }
       }
 
@@ -478,8 +564,7 @@ export default function Home() {
     let ws: WebSocket | null = null;
 
     try {
-      const wsUrl =
-        process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:5000";
+      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:5001/ws";
 
       ws = new WebSocket(wsUrl);
 
@@ -557,6 +642,9 @@ export default function Home() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(getStoredToken()
+            ? { Authorization: `Bearer ${getStoredToken()}` }
+            : {}),
         },
         body: JSON.stringify({
           query: q,
@@ -581,18 +669,14 @@ export default function Home() {
       const providerModel = res.headers.get("x-model") || "";
       const headerLayer = res.headers.get("x-cache") || "MISS";
       const toolName = res.headers.get("x-tool");
-      const timing = parseServerTiming(
-        res.headers.get("server-timing")
-      );
+      const timing = parseServerTiming(res.headers.get("server-timing"));
 
       const embeddingStatus = res.headers.get("x-embedding-cache");
       const semanticStatus = res.headers.get("x-semantic-cache");
       const similarityHeader = res.headers.get("x-similarity");
 
       setModel(
-        providerModel
-          ? `${providerName} · ${providerModel}`
-          : providerName
+        providerModel ? `${providerName} · ${providerModel}` : providerName
       );
 
       setCacheInfo({
@@ -618,6 +702,7 @@ export default function Home() {
 
       const appendAnswerText = (text: string) => {
         if (!text) return;
+
         streamedAnswerRef.current += text;
         scheduleAnswerUpdate(request);
       };
@@ -625,8 +710,6 @@ export default function Home() {
       const applyParsed = (parsed: StreamParseResult) => {
         appendAnswerText(parsed.text);
 
-        // Trace steps arrive DURING the request and are appended as they land,
-        // so the pipeline renders live (meta/error only arrive at the end).
         if (parsed.traces.length > 0) {
           setTrace((prev) => [...prev, ...parsed.traces]);
         }
@@ -643,8 +726,6 @@ export default function Home() {
 
       if (!isCurrentRequest(request)) return;
 
-      // Flush the decoder, then let the parser release its buffered tail (it can
-      // no longer be part of a marker) and interpret a trailing marker.
       applyParsed(parser.push(decoder.decode()));
 
       const ending = parser.finish();
@@ -661,7 +742,6 @@ export default function Home() {
         setCacheInfo(null);
         setLatency(null);
         setCurrentUsage(null);
-
         setError(ending.error);
 
         console.error(`[Q-${request.id}] ERROR | ${ending.error}`);
@@ -669,7 +749,9 @@ export default function Home() {
         return;
       }
 
-      if (ending.meta) streamMetaRef.current = ending.meta;
+      if (ending.meta) {
+        streamMetaRef.current = ending.meta;
+      }
 
       appendAnswerText(ending.text);
 
@@ -684,23 +766,18 @@ export default function Home() {
         setCacheInfo((prev) =>
           prev
             ? {
-                ...prev,
-                layer: metaLayer,
-                hit: isCacheHit(metaLayer),
-                provider: meta.provider || prev.provider,
-                tool: meta.tool ?? prev.tool,
-                embeddingStatus:
-                  meta.embeddingStatus ?? prev.embeddingStatus,
-                semanticStatus:
-                  meta.semanticStatus ?? prev.semanticStatus,
-                similarity: meta.similarity ?? prev.similarity,
-              }
+              ...prev,
+              layer: metaLayer,
+              hit: isCacheHit(metaLayer),
+              provider: meta.provider || prev.provider,
+              tool: meta.tool ?? prev.tool,
+              embeddingStatus: meta.embeddingStatus ?? prev.embeddingStatus,
+              semanticStatus: meta.semanticStatus ?? prev.semanticStatus,
+              similarity: meta.similarity ?? prev.similarity,
+            }
             : prev
         );
 
-        // The provider/model badge is read from headers, but those were already
-        // flushed with the first trace line — the trailing meta marker is the
-        // authoritative value, so re-apply it here.
         if (meta.provider || meta.model) {
           setModel([meta.provider, meta.model].filter(Boolean).join(" · "));
         }
@@ -712,8 +789,6 @@ export default function Home() {
 
       setLatency({
         firstTokenMs: timing["first-token"] ?? null,
-        // Headers may have been flushed before the timing existed (first trace
-        // line), in which case the trailing meta marker carries the server time.
         serverMs: timing["total"] ?? streamMetaRef.current?.serverMs ?? null,
         totalMs,
       });
@@ -722,15 +797,12 @@ export default function Home() {
         `[Q-${request.id}] RESULT | ${cacheOutcome(finalLayer)} | ${finalLayer} | ${cacheProviderLabel(providerName)} | ${totalMs}ms`
       );
 
-      // Estimated token usage
       const historyCharacters = requestHistory.reduce(
         (total, message) => total + message.content.length,
         0
       );
 
-      const promptEstimate = Math.ceil(
-        (q.length + historyCharacters) / 4
-      );
+      const promptEstimate = Math.ceil((q.length + historyCharacters) / 4);
 
       const completionEstimate = Math.ceil(finalAnswer.length / 4);
 
@@ -760,9 +832,7 @@ export default function Home() {
 
       if (!isCurrentRequest(request)) return;
 
-      setHistory((prev) =>
-        [...prev, ...completedTurn].slice(-MAX_HISTORY_ITEMS)
-      );
+      setHistory((prev) => [...prev, ...completedTurn].slice(-MAX_HISTORY_ITEMS));
     } catch (err) {
       if (!isCurrentRequest(request)) {
         console.log(`[Q-${request.id}] CANCELLED | Ignored stale request`);
@@ -777,8 +847,7 @@ export default function Home() {
         return;
       }
 
-      const message =
-        err instanceof Error ? err.message : "Something went wrong";
+      const message = err instanceof Error ? err.message : "Something went wrong";
 
       setError(message);
       console.error(`[Q-${request.id}] ERROR | ${message}`);
@@ -799,27 +868,18 @@ export default function Home() {
   }
 
   // ============================================================
-  // Reset
+  // Reset and keyboard handlers
   // ============================================================
 
   function stopResponse(event: ReactMouseEvent<HTMLButtonElement>) {
-    // Stop and Ask share this slot, so React rewrites the same <button> node
-    // while the click is still being dispatched. Cancelling the click's default
-    // action is the second half of keeping a Stop click out of the form (the
-    // first half is that neither button is a submit button any more).
     event.preventDefault();
-
     cancelActiveRequest(true);
   }
 
   function handleInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
     if (event.key !== "Enter") return;
 
-    // The form deliberately has no submit button (its controls are plain
-    // buttons), so Enter must not rely on the browser's implicit submission:
-    // submit here instead — exactly once, even while the input is disabled.
     event.preventDefault();
-
     void runSearch();
   }
 
@@ -859,10 +919,7 @@ export default function Home() {
     : null;
 
   const semanticBadge = cacheInfo
-    ? semanticStatusDisplay(
-        cacheInfo.semanticStatus,
-        cacheInfo.similarity
-      )
+    ? semanticStatusDisplay(cacheInfo.semanticStatus, cacheInfo.similarity)
     : null;
 
   const isShared = cacheInfo?.layer === "COALESCED";
@@ -873,11 +930,9 @@ export default function Home() {
     cacheInfo?.layer === "GREETING" ||
     cacheInfo?.layer === "OUT_OF_SCOPE";
 
-  const visibleCacheStatus = cacheInfo
-    ? cacheOutcome(cacheInfo.layer)
-    : loading
-      ? "CHECKING CACHE..."
-      : "WAITING FOR QUESTION";
+  // ============================================================
+  // Cache badge (same look as the login page's message bar)
+  // ============================================================
 
   const cacheBadgeClass =
     cacheInfo && isCacheHit(cacheInfo.layer)
@@ -886,50 +941,97 @@ export default function Home() {
         ? "stats"
         : "miss";
 
+  // This is what was missing — the text shown inside the cache badge.
+  const visibleCacheStatus = loading
+    ? "PENDING…"
+    : cacheInfo
+      ? cacheOutcome(cacheInfo.layer)
+      : "NO REQUEST YET";
+
+  // ============================================================
+  // Branded header + main UI
+  // ============================================================
+
   return (
-    <main className="page">
+    <main
+      className={`page transition-all duration-700 ease-out ${mounted ? "animate-in fade-in slide-in-from-bottom-6" : "opacity-0"
+        }`}
+    >
       <div className="shell">
         <header className="header">
           <div className="header-top">
             <div className="brand-group">
-              <p className="brand">OpsMate</p>
+              <p className="brand-eyebrow">OPSMATE</p>
 
-              <span
-                className={`ws-badge ${
-                  wsStatus.includes("Connected") ? "connected" : ""
-                }`}
-              >
-                ● {wsStatus}
-              </span>
+              <div className="brand-title-row">
+                <h1 className="brand">OpsMate</h1>
+
+                <span
+                  className={`ws-badge ${wsStatus.includes("Connected") ? "connected" : ""
+                    }`}
+                >
+                  ● {wsStatus}
+                </span>
+              </div>
             </div>
 
-            {/* Tracked with state, not the request ref: reading a ref during
-                render would leave this button stuck at its first value. */}
+            {identity && (
+              <span className="identity animated-in">
+                <span className="identity-label">Logged in as</span>
+                <span className="identity-name">{identity.name}</span>
+                <span className="identity-email">{identity.email}</span>
+                <span
+                  className={`pill ${identity.role === "admin" ? "admin" : "user"}`}
+                >
+                  {identity.role === "admin" ? "Admin" : "User"}
+                </span>
+                {identity.role === "admin" && (
+                  <a
+                    href="/admin"
+                    className="identity-admin-link"
+                  >
+                    ⚙ Admin panel
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="identity-signout"
+                  onClick={() => void signOut()}
+                >
+                  Sign out
+                </button>
+              </span>
+            )}
+
+            {!identity && (
+              <span className="identity identity-empty animated-in">
+                No logged-in user
+              </span>
+            )}
+
+            {!identity && (
+              <button type="button" className="auth-open-btn" onClick={openAuthModal}>
+                <span className="auth-open-btn-icon">⟶</span>
+                <span>Sign in / create account</span>
+              </button>
+            )}
+
             {(history.length > 0 || loading) && (
-              <button
-                type="button"
-                onClick={resetSession}
-                className="reset-btn"
-              >
+              <button type="button" onClick={resetSession} className="reset-btn">
                 Reset Context
               </button>
             )}
           </div>
-
-          <h1>Test the AI model</h1>
 
           <p className="sub">
             Ask a question. Cached answers return quickly; cache misses are
             generated by the model.
           </p>
 
-          <p className="sub">
-            Conversation history: last {history.length / 2} of{" "}
-            {MAX_HISTORY_MESSAGES} turns retained.
-          </p>
+
         </header>
 
-        {/* Search */}
+        {/* Search form */}
         <form className="search" onSubmit={runSearch}>
           <label htmlFor="q" className="sr-only">
             Search
@@ -959,17 +1061,13 @@ export default function Home() {
               ■ Stop
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={() => void runSearch()}
-              className="ask-btn"
-            >
+            <button type="submit" className="ask-btn">
               Ask
             </button>
           )}
         </form>
 
-        {/* Permanent response panel: position remains stable */}
+        {/* AI response */}
         <section
           className="response-panel"
           aria-live="polite"
@@ -986,7 +1084,10 @@ export default function Home() {
               )}
             </div>
 
-            <span className={`cache-badge ${cacheBadgeClass}`}>
+            <span
+              className={`cache-badge ${cacheBadgeClass} ${loading ? "pending-pulse" : ""
+                }`}
+            >
               {visibleCacheStatus}
             </span>
           </div>
@@ -994,9 +1095,7 @@ export default function Home() {
           <div className="response-cache-info">
             <span>
               <strong>Layer:</strong>{" "}
-              {cacheInfo
-                ? cacheLayerLabel(cacheInfo.layer)
-                : "Not determined yet"}
+              {cacheInfo ? cacheLayerLabel(cacheInfo.layer) : "Not determined yet"}
             </span>
 
             {model && (
@@ -1022,9 +1121,7 @@ export default function Home() {
             <div className="response-loading">
               <span className="loading-spinner" />
               <span>
-                {answer
-                  ? "Generating response…"
-                  : "Waiting for the first token…"}
+                {answer ? "Generating response…" : "Waiting for the first token…"}
               </span>
             </div>
           )}
@@ -1041,9 +1138,7 @@ export default function Home() {
                 The response could not be completed. See the error below.
               </p>
             ) : (
-              <p className="response-placeholder">
-                Your answer will appear here.
-              </p>
+              <p className="response-placeholder">Your answer will appear here.</p>
             )}
           </div>
 
@@ -1063,8 +1158,8 @@ export default function Home() {
 
               {cacheInfo.layer === "L1_MEMORY" && (
                 <p className="response-explanation">
-                  This answer came from the in-memory cache. The LLM did not
-                  need to generate it again.
+                  This answer came from the in-memory cache. The LLM did not need
+                  to generate it again.
                 </p>
               )}
 
@@ -1089,29 +1184,28 @@ export default function Home() {
 
               {cacheInfo.layer === "BYPASS_ORDER" && (
                 <p className="response-explanation">
-                  Order details were looked up directly in PostgreSQL. This
-                  is not a cache hit.
+                  Order details were looked up directly in PostgreSQL. This is
+                  not a cache hit.
                 </p>
               )}
 
               {isShared && (
                 <p className="response-explanation">
-                  This request shared work with another identical request; it
-                  is not a stored-cache hit.
+                  This request shared work with another identical request; it is
+                  not a stored-cache hit.
                 </p>
               )}
 
-              {isBypass &&
-                cacheInfo.layer !== "BYPASS_ORDER" && (
-                  <p className="response-explanation">
-                    This request bypassed the regular cache path.
-                  </p>
-                )}
+              {isBypass && cacheInfo.layer !== "BYPASS_ORDER" && (
+                <p className="response-explanation">
+                  This request bypassed the regular cache path.
+                </p>
+              )}
             </div>
           )}
         </section>
 
-        {/* Live pipeline trace: which step is running right now */}
+        {/* Live pipeline trace */}
         {trace.length > 0 && (
           <section
             className="trace-panel"
@@ -1127,9 +1221,9 @@ export default function Home() {
             </div>
 
             <ol className="trace-list">
-              {trace.map((step) => (
+              {trace.map((step, idx) => (
                 <li
-                  key={`${step.n}-${step.stage}`}
+                  key={`trace-${idx}-${step.n ?? 0}-${step.stage}`}
                   className={`trace-step ${step.stage} ${step.status}`}
                 >
                   <span className="trace-dot" aria-hidden="true" />
@@ -1172,11 +1266,7 @@ export default function Home() {
             const { icon, title, body } = parseErrorInfo(error);
 
             return (
-              <div
-                className="error-card"
-                role="alert"
-                aria-live="assertive"
-              >
+              <div className="error-card" role="alert" aria-live="assertive">
                 <div className="error-card-header">
                   <span className="error-card-icon" aria-hidden="true">
                     {icon}
@@ -1190,7 +1280,7 @@ export default function Home() {
                 <button
                   type="button"
                   className="error-card-retry"
-                  onClick={() => runSearch()}
+                  onClick={() => void runSearch()}
                 >
                   🔄 Try Again
                 </button>
@@ -1264,9 +1354,7 @@ export default function Home() {
                   </div>
 
                   <div className="metric total">
-                    <span className="label">
-                      Total Accumulated Context:
-                    </span>
+                    <span className="label">Total Accumulated Context:</span>
                     <span className="value">
                       {totalUsage.totalTokens.toLocaleString()} tokens
                     </span>

@@ -8,27 +8,38 @@ It runs as a separate process and can connect to Claude Desktop, MCP Inspector, 
 
 ## Features
 
+- **Authentication:** registration, login, logout with bcrypt password hashing and opaque, database-backed session tokens (only SHA-256 token hashes are stored).
+- **Authorization:** every tool call is resolved to a server-verified identity; normal users can only ever see their own orders, admins see all orders and may update stock. Ownership filters are applied inside the SQL queries themselves.
 - Retrieve complete order details.
-- List orders with optional status filtering.
-- Check current product stock.
+- List orders with optional status filtering and pagination.
+- Create orders with transactional stock reservation (no overselling).
+- List products, check current product stock.
 - Search products by name or SKU.
-- Increase or decrease product stock.
+- Admin-only stock updates that never go negative.
 - PostgreSQL integration using a connection pool.
-- Input validation and string sanitization.
-- Stdio transport for MCP client communication.
+- Input validation (Zod) and string sanitization.
+- Stdio transport **and** Streamable HTTP transport with per-request Bearer authentication.
 
 ## Project Structure
 
 ```text
 opsmate/
-├── backend/                   # Express chat backend
+├── backend/                   # Express chat backend (reuses mcp/tools.js handlers)
 ├── frontend/                  # Next.js frontend
 ├── mcp/
 │   ├── .env                   # Database configuration (not committed)
-│   ├── index.js               # MCP entry point and tool registration
+│   ├── index.js               # MCP stdio entry point + auth context resolution
+│   ├── http-server.js         # Streamable HTTP entry point (Bearer auth)
 │   ├── db.js                  # PostgreSQL connection pool
-│   ├── tools.js               # Five MCP tool handlers
-│   ├── advanced-test.js       # MCP tool tests
+│   ├── auth.js                # bcrypt auth, sessions, role authorization helpers
+│   ├── tools.js               # Tool descriptions, Zod schemas, secured handlers
+│   ├── register-tools.js      # Shared tool registration for both transports
+│   ├── auth-test-helpers.js   # Trusted test fixtures
+│   ├── auth-test.js           # Authentication/authorization test suite (16 tests)
+│   ├── smoke-test.js          # End-to-end test over the real transports
+│   ├── advanced-test.js       # MCP tool tests (existing suite, admin fixture)
+│   ├── scripts/
+│   │   └── create-admin.js    # TRUSTED admin bootstrap (the only admin path)
 │   ├── package.json           # MCP dependencies
 │   ├── package-lock.json
 │   └── README.md              # MCP server documentation
@@ -79,15 +90,58 @@ When running through Claude Desktop or MCP Inspector, the client launches the MC
 
 ## MCP Tools
 
-| Tool | Inputs | Description |
-|---|---|---|
-| `get_order` | `order_id: string` | Retrieves an order, customer details, status, total, and line items. |
-| `list_orders` | `status?: string`, `limit?: number` | Lists orders, optionally filtered by status. |
-| `check_stock` | `sku: string` | Retrieves current stock and product active status. |
-| `search_products` | `query: string`, `limit?: number` | Searches products by full or partial name, or SKU. |
-| `update_stock` | `sku: string`, `quantity: number` | Adjusts stock using a signed quantity: positive adds stock, negative removes stock. |
+| Tool | Inputs | Access | Description |
+|---|---|---|---|
+| `register` | `name`, `email`, `password` | public | Creates an account. **Always role `user`**, regardless of any arguments sent. |
+| `login` | `email`, `password` | public | Verifies credentials server-side and issues an opaque session token. |
+| `logout` | — | authenticated | Revokes the current session; later calls fail closed. |
+| `whoami` | — | authenticated | Shows the verified identity, role, and access scope. |
+| `get_order` | `order_id: string` | authenticated | Retrieves an order — user: **only own orders**; admin: any order.foreign orders are reported as `Order not found` (no existence leak). |
+| `list_orders` | `status?`, `limit?`, `offset?` | authenticated | User: own orders only. Admin: all orders including legacy unowned ones. |
+| `create_order` | `items: [{ sku, quantity }]` | authenticated | Creates an order for the **authenticated caller** with trusted DB prices and a transactional stock reservation. Any `user_id` in the arguments is ignored. |
+| `list_products` | `limit?: number` | authenticated | Active products with public fields only. |
+| `check_stock` | `sku: string` | authenticated | Retrieves current stock and product active status. |
+| `search_products` | `query: string`, `limit?: number` | authenticated | Searches products by full or partial name, or SKU. |
+| `update_stock` | `sku: string`, `quantity: number` | **admin only** | Normal users receive `Permission denied`. Stock can never go negative. |
 
 String inputs are sanitized by the helper in `tools.js` to handle common formatting issues, such as surrounding quotes and stray key prefixes.
+
+## Authentication & Authorization
+
+### Identity model
+
+- Passwords are hashed with **bcrypt** (cost 12). Plaintext passwords are never stored or logged.
+- Sessions are opaque random tokens; only a **SHA-256 hash** is stored in the `sessions` table, with expiry and instant revocation (logout deletes the row).
+- The verified identity `{ userId, email, role }` is built **only** from a valid DB-backed session. Tool arguments, model output, and client headers never establish identity or role.
+- Authorization fails closed: no session → every protected tool answers `Authentication required`.
+- Public registration always produces role `user`. Admin is granted **only** by the trusted offline script (below) — never through the MCP protocol.
+
+### How identity is established for each client
+
+**Stdio (Claude Desktop, MCP Inspector):** a stdio process serves exactly one local user. Put a valid session token in the client's environment as `MCP_AUTH_TOKEN`, or call the `login` tool once in that client session (the server remembers the verified session per process). For Claude Desktop, add `"env": { "MCP_AUTH_TOKEN": "ops_…" }` to the `mcpServers` entry. A web application's login does NOT authenticate Claude Desktop — each client establishes its own identity.
+
+**Streamable HTTP (multiple remote users):** start `node http-server.js` (default `http://0.0.0.0:3002/mcp`, configurable via `MCP_HTTP_PORT`/`MCP_HTTP_HOST`). Every request must carry `Authorization: Bearer <session token>`; the token is verified against the database per request, so each remote user authenticates independently and revocation is immediate. Only `register` and `login` are reachable without a token (identity bootstrapping); anything else returns 401.
+
+> OAuth note: the MCP Streamable HTTP OAuth flow (RFC 8414 metadata + PKCE with a dedicated authorization server) is the standard multi-user deployment option; this server implements the same trust model with first-party bearer tokens verified server-side per request. Swapping in an OAuth identity provider later only requires replacing the token resolver in `http-server.js`.
+
+### Admin creation (trusted administrative process)
+
+```bash
+# password comes from the environment — never from code or prompts
+ADMIN_PASSWORD='your-secret' node mcp/scripts/create-admin.js --name "Ops Admin" --email admin@example.com --token
+```
+
+- `--token` additionally prints an `MCP_AUTH_TOKEN=ops_…` line for client configuration.
+- `--email <existing user> --promote` promotes an existing account to admin after an interactive confirmation.
+- `--ttl-days N` sets a longer session validity for machine/service accounts.
+
+### Backend (chat) service integration
+
+`backend/server.js` reuses the same tool handlers. The dedicated service account (an `MCP_SERVICE_TOKEN` in `backend/.env`) is only a FALLBACK for callers that send no Bearer token at all. When a web/chat request carries the browser's session token, the backend resolves it to a VERIFIED identity and every tool call runs as THAT user: normal users see only their own orders and are denied `update_stock`; admins see all orders. A token that is present but invalid/expired is rejected with 401 — it is never silently widened to the service account. The service token is still re-verified against the database for every fallback tool call, so expiry or revocation applies at once.
+
+### Legacy orders with `user_id = NULL`
+
+The three pre-existing orders (ORD-1001…1003) predate accounts and are **not** assigned to any user. They are ignored by user-scoped queries and remain visible to **admins only**. They can be claimed one-by-one by an admin using a deliberate ownership backfill (`UPDATE … SET user_id`) when the real owner is known — no automatic assignment. New orders created through `create_order` are always owned by the authenticated user.
 
 ## Testing with MCP Inspector
 
@@ -149,10 +203,17 @@ Use the Inspector interface to connect to the server and invoke each tool with i
 ### Run automated tests
 
 ```powershell
+# authentication & authorization suite (all 14 required security scenarios)
+node --test auth-test.js
+
+# existing tool suite (runs as a trusted admin fixture)
 node --test advanced-test.js
+
+# live end-to-end verification over BOTH transports (stdio + HTTP)
+node smoke-test.js
 ```
 
-Run this command from the `mcp/` directory. Test results depend on the current test file, dependencies, and database configuration.
+Run these commands from the `mcp/` directory. `auth-test.js` creates its own fixture users and restores stock afterwards; `advanced-test.js` already covers the pre-existing tool expectations. Nothing in either suite requires mutation-test opt-in anymore except the idempotent stock restore.
 
 ## Claude Desktop Configuration
 
@@ -284,19 +345,24 @@ If the server fails to connect:
 
 ## Scope and Limitations
 
-- **Authentication and authorization:** Not implemented in this phase.
+- **Authentication and authorization:** Implemented (bcrypt password hashing, DB-backed sessions, per-call verification, User/Admin roles, SQL-level ownership filters). Admin only via the trusted bootstrap script.
 - **Inventory audit history:** Not implemented. Stock is updated directly; no stock-change history is maintained.
-- **Order creation and stock reservation:** Outside the scope of the current tools.
-- **Transport:** The current server uses stdio; it is not configured as a Streamable HTTP server.
+- **OAuth authorization server:** Not deployed. Streamable HTTP uses first-party opaque Bearer tokens verified per request; swapping in an OAuth provider is a resolver change in `http-server.js`.
+- **Legacy order ownership backfill:** Deliberately not automated.
 
 ## Current Status
 
 - [x] PostgreSQL connection configured
-- [x] Five MCP tools implemented
+- [x] Eleven MCP tools implemented (auth + orders + products + admin stock)
 - [x] MCP Inspector connection and tool testing completed
 - [x] Claude Desktop connection verified
 - [x] `get_order`, `list_orders`, `check_stock`, and `search_products` tested
 - [x] `update_stock` tested and the updated stock verified
 - [x] Input sanitization implemented
+- [x] Registration/login/logout with bcrypt and DB-backed sessions
+- [x] User/Admin authorization enforced server-side on every tool
+- [x] `create_order` with transactional, oversell-safe stock reservation
+- [x] Streamable HTTP transport with per-request Bearer authentication
+- [x] 16-test authorization suite + live transport smoke test passing
 
 **Project goal:** Expose existing OpsMate order and inventory operations as reusable MCP tools that compatible AI clients can discover and invoke.

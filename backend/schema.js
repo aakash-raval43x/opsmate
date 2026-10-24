@@ -1,8 +1,16 @@
 
 // schema.js
 // Standalone database schema setup for OpsMate + Order/Inventory MCP
-// Run: node schema.js
+// Run: node schema.js   (safe to re-run; all statements are idempotent)
+//
+// Load THIS directory's .env first (local dev points at 127.0.0.1), then the
+// repo root's as a fallback (docker-compose points at the `postgres`
+// service). Anchoring to __dirname keeps behavior identical no matter which
+// directory the script is run from. NO `override: true`: when server.js
+// imports this module, an overriding load would clobber explicit environment
+// values (e.g. a caller-provided PORT).
 
+require("dotenv").config({ path: require("path").resolve(__dirname, ".env") });
 require("dotenv").config();
 
 const { Pool } = require("pg");
@@ -41,6 +49,34 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uniq
     ON users (LOWER(email));
+
+
+-- =========================================================
+-- 2a. SESSIONS (MCP authentication)
+-- Opaque session tokens for MCP clients (stdio env token and
+-- Streamable HTTP Bearer tokens). Only a SHA-256 hash of each
+-- token is stored, so a database leak does not expose tokens.
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+
+    CONSTRAINT sessions_expires_check
+        CHECK (expires_at > created_at)
+);
+
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx
+    ON sessions (user_id);
+
+CREATE INDEX IF NOT EXISTS sessions_expires_at_idx
+    ON sessions (expires_at);
 
 
 -- =========================================================
@@ -254,7 +290,7 @@ async function main() {
     await client.query("COMMIT");
 
     console.log("Database schema created/updated successfully.");
-    console.log("Tables: users, products, orders, order_items, queries, query_cache");
+    console.log("Tables: users, sessions, products, orders, order_items, queries, query_cache");
     console.log("Order ownership column: orders.user_id");
     console.log("Semantic cache: vector(768) + IVFFlat index");
   } catch (error) {
@@ -268,8 +304,53 @@ async function main() {
   }
 }
 
-main().catch(async (error) => {
-  console.error("Database connection/setup failed:", error.message);
-  await pool.end();
-  process.exitCode = 1;
-});
+// -------------------------------------------------------------
+// EXPORTS
+//
+// ensureSchema(pool, opts) — idempotent schema creation used by server.js at
+// boot on ITS OWN pg pool. Runs the same SQL as the standalone script but
+// NEVER calls pool.end() (the caller owns that pool), and honors the server's
+// embedding model/dimension configuration.
+// -------------------------------------------------------------
+
+async function ensureSchema(pool, opts = {}) {
+  const logger = opts.logger || console;
+
+  const embeddingModel = String(opts.embeddingModel || 'nomic-embed-text:latest').replace(/'/g, "''");
+  const embeddingDim = Number(opts.embeddingDim || 768);
+  if (!Number.isInteger(embeddingDim) || embeddingDim < 0 || embeddingDim > 16000) {
+    throw new Error(`Invalid embedding dimension: ${embeddingDim}`);
+  }
+
+  const sql = schemaSQL
+    .replace(/VECTOR\(768\)/g, `VECTOR(${embeddingDim})`)
+    .replace(/'nomic-embed-text:latest'/g, `'${embeddingModel}'`);
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query(sql);
+    await client.query("COMMIT");
+    logger.log?.("[schema] ensured: users, sessions, products, orders, order_items, queries, query_cache");
+    return true;
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch (_e) { /* connection may be broken */ }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { ensureSchema, schemaSQL };
+
+// Standalone execution only: applying the schema with THIS module's own pool
+// and ending it afterwards. Merely requiring schema.js (as server.js does)
+// must have NO side effects — no schema run, no pool teardown.
+if (require.main === module) {
+  main().catch(async (error) => {
+    console.error("Database connection/setup failed:", error.message);
+    await pool.end();
+    process.exitCode = 1;
+  });
+}

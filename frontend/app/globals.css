@@ -2,19 +2,20 @@
 @import "tailwindcss";
 
 :root {
-  --ink: #14212b;
-  --muted: #5a6b78;
-  --paper: #f8faf9;
+  /* Design tokens mirrored from the admin/login pages (Tailwind slate + blue):
+     slate-900 ink, slate-500 muted, slate-200 lines, blue-600 accent. */
+  --ink: #0f172a;
+  --muted: #64748b;
+  --paper: #f8fafc;
   --panel: #ffffff;
-  --accent: #0f766e;
-  --accent-hover: #0d9488;
-  --accent-blue: #2563eb;
-  --danger: #b42318;
-  --line: #d5dde3;
-  --glow:
-    radial-gradient(1200px 600px at 10% -10%, #c7ebe6 0%, transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, #dbe7f5 0%, transparent 50%),
-    linear-gradient(180deg, #eef3f1 0%, #f7f8f6 100%);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-blue: #4f46e5;
+  --danger: #e11d48;
+  --danger-hover: #be123c;
+  --line: #e2e8f0;
+  --ring: rgba(59, 130, 246, 0.1);
+  --glow: #f1f5f9;
 }
 
 * {
@@ -42,16 +43,18 @@ input {
   min-height: 100vh;
   display: grid;
   place-items: start center;
-  padding: 2rem 1.25rem;
+  padding: 2rem 1rem;
 }
 
 .shell {
-  width: min(720px, 100%);
+  width: min(56rem, 100%);
   min-width: 0;
 }
 
+/* Staggered entrance exactly like the admin page: header -> search -> panel */
 .header {
   margin-bottom: 1.75rem;
+  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .header-top {
@@ -62,33 +65,41 @@ input {
 }
 
 .brand-group {
+  display: grid;
+  gap: 0.35rem;
+}
+
+/* Admin/login eyebrow: uppercase, wide tracking, blue-600 */
+.brand-eyebrow {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.brand-title-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
 }
 
 .brand {
-  margin: 0 0 0.5rem;
-  font-family: var(--font-display), Georgia, serif;
-  font-size: clamp(2.4rem, 6vw, 3.4rem);
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1;
-  color: var(--ink);
-}
-
-.header h1 {
   margin: 0;
-  font-size: 1.15rem;
-  font-weight: 600;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-size: clamp(1.5rem, 4vw, 1.875rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
   color: var(--ink);
 }
 
 .sub {
   margin: 0.45rem 0 0;
   color: var(--muted);
-  font-size: 0.98rem;
+  font-size: 0.875rem;
   line-height: 1.5;
 }
 
@@ -113,19 +124,21 @@ input {
 
 .reset-btn {
   background: transparent;
-  border: 1px solid var(--line);
-  color: var(--muted);
+  border: 1px solid #fecdd3;
+  color: var(--danger);
   border-radius: 8px;
-  padding: 0.35rem 0.75rem;
+  padding: 0.4rem 0.85rem;
   font-size: 0.82rem;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .reset-btn:hover {
-  background: #fee2e2;
-  color: var(--danger);
-  border-color: #fca5a5;
+  background: #fff1f2;
+  color: var(--danger-hover);
+  border-color: #fda4af;
+  transform: translateY(-1px);
 }
 
 /* Search form */
@@ -134,40 +147,40 @@ input {
   display: flex;
   gap: 0.65rem;
   align-items: stretch;
+  animation: fadeInUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .search input {
   flex: 1;
   min-width: 0;
-  border: 1px solid var(--line);
+  border: 1px solid #cbd5e1;
   background: var(--panel);
   color: var(--ink);
-  border-radius: 12px;
-  padding: 0.95rem 1.1rem;
-  font-size: 1rem;
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  font-size: 0.98rem;
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .search input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 4px var(--ring);
 }
 
 .search button {
   border: none;
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--accent);
   color: white;
   font-weight: 600;
   padding: 0 1.35rem;
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
 }
 
 .search button:hover:not(:disabled) {
   background: var(--accent-hover);
-  transform: translateY(-1px);
 }
 
 .search button:disabled {
@@ -186,8 +199,7 @@ input {
 }
 
 .search button.stop-btn:hover {
-  background: #912018;
-  transform: translateY(-1px);
+  background: var(--danger-hover);
 }
 
 /* Permanent response panel */
@@ -196,8 +208,8 @@ input {
   margin-top: 1.25rem;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 1.1rem 1.2rem;
+  border-radius: 16px;
+  padding: 1.25rem;
   min-width: 0;
   max-width: 100%;
   min-height: 260px;
@@ -205,6 +217,8 @@ input {
   flex-direction: column;
   gap: 0.85rem;
   overflow: hidden;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  animation: fadeInUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .response-panel-header {
@@ -217,7 +231,7 @@ input {
 
 .response-panel-header h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.125rem;
   font-weight: 700;
   color: var(--ink);
 }
@@ -237,11 +251,11 @@ input {
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 700;
-  border-radius: 20px;
-  padding: 0.28rem 0.65rem;
-  border: 1px solid transparent;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 0.25rem 0.6rem;
+  border: none;
   white-space: normal;
   text-align: center;
   flex-shrink: 0;
@@ -249,20 +263,17 @@ input {
 
 .cache-badge.hit {
   color: #047857;
-  background: #ecfdf5;
-  border-color: #a7f3d0;
+  background: #d1fae5;
 }
 
 .cache-badge.miss {
   color: #475569;
   background: #f1f5f9;
-  border-color: #e2e8f0;
 }
 
 .cache-badge.stats {
   color: #0f766e;
-  background: #f0fdfa;
-  border-color: #99f6e4;
+  background: #ccfbf1;
 }
 
 /* Cache layer, provider and timing */
@@ -288,10 +299,10 @@ input {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  color: #0f766e;
-  background: #f0fdfa;
-  border: 1px solid #ccfbf1;
-  border-radius: 9px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
   padding: 0.65rem 0.8rem;
   font-size: 0.85rem;
   font-weight: 500;
@@ -301,8 +312,8 @@ input {
   width: 18px;
   height: 18px;
   flex: 0 0 18px;
-  border: 3px solid #ccfbf1;
-  border-top-color: #0f766e;
+  border: 3px solid #dbeafe;
+  border-top-color: #2563eb;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -365,8 +376,8 @@ input {
   gap: 0.3rem;
   font-size: 0.75rem;
   font-weight: 500;
-  color: #334155;
-  background: #f8fafc;
+  color: #475569;
+  background: #f1f5f9;
   border: 1px solid #e2e8f0;
   border-radius: 20px;
   padding: 0.22rem 0.65rem;
@@ -378,15 +389,16 @@ input {
 
 .error-card {
   margin-top: 1.25rem;
-  background: #fff5f5;
-  border: 1px solid #fecaca;
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
   border-left: 4px solid var(--danger);
-  border-radius: 12px;
-  padding: 1.1rem 1.2rem;
+  border-radius: 16px;
+  padding: 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
-  animation: rise 0.28s ease;
+  box-shadow: 0 20px 25px -5px rgba(226, 232, 240, 0.6), 0 8px 10px -6px rgba(226, 232, 240, 0.6);
+  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .error-card-header {
@@ -405,13 +417,13 @@ input {
   margin: 0;
   font-size: 0.97rem;
   font-weight: 700;
-  color: #991b1b;
+  color: #be123c;
 }
 
 .error-card-body {
   margin: 0;
   font-size: 0.92rem;
-  color: #7f1d1d;
+  color: #9f1239;
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-line;
@@ -424,7 +436,7 @@ input {
   color: #fff;
   border: none;
   border-radius: 8px;
-  padding: 0.4rem 0.9rem;
+  padding: 0.45rem 0.95rem;
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
@@ -432,8 +444,11 @@ input {
 }
 
 .error-card-retry:hover {
-  background: #912018;
-  transform: translateY(-1px);
+  background: var(--danger-hover);
+}
+
+.error-card-retry:active {
+  transform: scale(0.98);
 }
 
 /* Context usage */
@@ -442,15 +457,16 @@ input {
   margin-top: 1.5rem;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 1.25rem 1.4rem;
-  animation: rise 0.28s ease;
+  border-radius: 16px;
+  padding: 1.25rem;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .context-usage h2 {
   margin: 0 0 1rem;
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: 1.125rem;
+  font-weight: 700;
   color: var(--ink);
   display: flex;
   align-items: center;
@@ -464,16 +480,17 @@ input {
 }
 
 .usage-card {
-  background: var(--paper);
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1.1rem 1.2rem;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  border-radius: 16px;
+  padding: 1.25rem;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
 }
 
 .usage-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  transform: translateY(-4px);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
 }
 
 .usage-card.current {
@@ -617,9 +634,11 @@ input {
   margin-top: 1.25rem;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 1rem 1.2rem 0.85rem;
+  border-radius: 16px;
+  padding: 1rem 1.25rem 0.85rem;
   min-width: 0;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  animation: fadeInUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .trace-header {
@@ -632,8 +651,8 @@ input {
 
 .trace-header h2 {
   margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: 1rem;
+  font-weight: 700;
   color: var(--ink);
 }
 
@@ -679,7 +698,7 @@ input {
   align-self: start;
   margin-top: 0.33rem;
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .trace-stage {
@@ -761,3 +780,587 @@ input {
   }
 }
 
+
+/* ===== OpsMate login / registration UI ===== */
+.signed-in {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7f9f8;
+}
+.signed-in strong {
+  color: var(--ink);
+}
+.signed-in .role {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #eef2f1;
+  color: var(--muted);
+}
+.pill.user {
+  background: #f1f5f9;
+  color: #475569;
+}
+.pill.admin {
+  background: #d1fae5;
+  color: #047857;
+}
+.pill button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  padding: 0;
+}
+.pill button:hover {
+  color: var(--danger);
+}
+.auth {
+  display: grid;
+  gap: 1.25rem;
+  max-width: 420px;
+}
+.auth-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.5rem 1.5rem 1.25rem;
+  box-shadow: 0 18px 34px -26px rgba(16, 24, 32, 0.25);
+}
+.auth-card h1 {
+  margin: 0 0 0.35rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.auth-card .sub {
+  margin: 0 0 1.1rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+.auth-card .opsmate {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+  margin-bottom: 1rem;
+}
+.field {
+  display: grid;
+  gap: 0.4rem;
+}
+.field label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+.field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.8rem 1rem;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  background: var(--paper);
+  color: var(--ink);
+}
+.field input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 4px var(--ring);
+}
+.field .help {
+  font-size: 0.76rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+.opsmate-form {
+  display: grid;
+  gap: 1rem;
+}
+.toggle-group {
+  display: flex;
+  background: #eef2f1;
+  border-radius: 9px;
+  padding: 3px;
+  gap: 3px;
+}
+.toggle-group button {
+  flex: 1;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  padding: 0.55rem 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.toggle-group button.active {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(16, 24, 32, 0.12);
+}
+.submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.9rem 1.2rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--accent);
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+.submit:hover {
+  background: var(--accent-hover);
+}
+.submit:active {
+  transform: translateY(1px);
+}
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.message-bar {
+  margin: 0.6rem 0 0;
+  font-size: 0.84rem;
+  color: var(--danger);
+  display: grid;
+  gap: 0.25rem;
+}
+.message-bar:first-child {
+  margin-top: 0;
+}
+.auth-footer {
+  margin-top: 1rem;
+  text-align: center;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+.auth-footer a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.auth-footer a:hover {
+  text-decoration: underline;
+}
+
+/* ============================================================
+   LOGIN / REGISTER MODAL  (animated overlay)
+   ============================================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: rgba(20, 33, 43, 0.42);
+  backdrop-filter: blur(6px);
+  animation: fadeIn 0.22s ease-out;
+}
+.modal-overlay[aria-hidden="false"] {
+  animation: fadeIn 0.22s ease-out;
+}
+.modal {
+  position: relative;
+  width: 100%;
+  max-width: 440px;
+  max-height: calc(100vh - 2.5rem);
+  overflow-y: auto;
+  animation: modalIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 90% at 50% 0%, rgba(15, 118, 110, 0.07), transparent 60%);
+}
+.modal-panel {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 1.6rem 1.6rem 1.4rem;
+  box-shadow: 0 24px 48px -24px rgba(16, 24, 32, 0.35);
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.1rem;
+}
+.modal-head-icon {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #047857;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.25rem;
+}
+.modal-head-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.modal-head-text h3 {
+  margin: 0 0 0.15rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.modal-head-text p {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.modal-close {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  border: none;
+  background: transparent;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.modal-close:hover {
+  background: #f1f5f9;
+  color: var(--ink);
+}
+.modal-tabs {
+  display: flex;
+  gap: 0.35rem;
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 3px;
+  margin-bottom: 1.1rem;
+}
+.modal-tab {
+  flex: 1;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.modal-tab.active {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(16, 24, 32, 0.12);
+}
+.auth-form {
+  display: grid;
+  gap: 0.9rem;
+}
+.modal-field label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.modal-field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.92rem;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  background: var(--paper);
+  color: var(--ink);
+}
+.modal-field input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 4px var(--ring);
+}
+.modal-error {
+  margin: 0.5rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.modal-success {
+  margin: 0.5rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #15803d;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.modal-foot {
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line);
+  text-align: center;
+}
+.modal-foot-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.modal-foot-link {
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.modal-foot-link:hover {
+  color: var(--ink);
+}
+.auth-open-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.5rem;
+}
+.auth-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: var(--panel);
+  color: #334155;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.auth-open-btn:hover {
+  background: var(--panel);
+  border-color: #3b82f6;
+  transform: translateY(-1px);
+}
+.auth-open-btn-icon {
+  font-size: 1.1rem;
+}
+
+/* ============================================================
+   JAVASCRIPT ANIMATION CLASSES (used by the component)
+   ============================================================ */
+.animate-in {
+  animation-duration: 0.7s;
+  animation-fill-mode: both;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.75); }
+}
+
+/* ============================================================
+   IDENTITY BANNER (logged-in user on the home page)
+   ============================================================ */
+.identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+}
+.identity:hover {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 2px 10px rgba(37, 99, 235, 0.12);
+  transform: translateY(-1px);
+}
+.identity-label {
+  color: var(--muted, #64748b);
+  font-weight: 500;
+}
+.identity-name {
+  font-weight: 700;
+  color: var(--text, #0f172a);
+}
+.identity-email {
+  color: var(--muted, #64748b);
+  font-size: 0.72rem;
+}
+.identity-empty {
+  color: var(--muted, #64748b);
+  font-weight: 600;
+  border-style: dashed;
+}
+.identity-signout {
+  margin-left: 0.25rem;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  cursor: pointer;
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.identity-signout:hover {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.identity-signout:active {
+  transform: scale(0.96);
+}
+.identity-admin-link {
+  margin-left: 0.25rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  text-decoration: none;
+  transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+.identity-admin-link:hover {
+  background: #dbeafe;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.18);
+}
+
+/* Smooth entrance for identity/banners rendered after mount */
+.animated-in {
+  animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Panels and cards: gentle hover lift for a smoother, more alive feel */
+.response-panel,
+.trace-panel,
+.context-usage,
+.usage-card,
+.error-card {
+  transition:
+    box-shadow 0.3s ease,
+    transform 0.3s ease,
+    border-color 0.3s ease;
+}
+
+/* Admin content panels deepen from shadow-sm to shadow-md on hover. */
+.response-panel:hover,
+.trace-panel:hover,
+.context-usage:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+}
+
+/* Ask button: soft press feedback */
+.ask-btn {
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+.ask-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.ask-btn:active {
+  transform: scale(0.98);
+}
+.stop-btn {
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+.stop-btn:active {
+  transform: scale(0.96);
+}
+
+/* Cache badge: gentle pulse while a request is pending */
+.cache-badge.pending-pulse {
+  animation: badgePulse 1.4s ease-in-out infinite;
+}
+@keyframes badgePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header,
+  .search,
+  .response-panel,
+  .trace-panel,
+  .context-usage,
+  .error-card,
+  .animated-in,
+  .cache-badge.pending-pulse {
+    animation: none;
+  }
+  .usage-card:hover {
+    transform: none;
+  }
+}

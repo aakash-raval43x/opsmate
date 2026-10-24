@@ -84,6 +84,10 @@ async function handleAssist(
     once: true,
   });
 
+  // The caller's Bearer token (if any) is forwarded unchanged so the backend
+  // can verify the session and scope every MCP tool call to that identity.
+  const authorization = request.headers.get("authorization");
+
   let backend: Response;
 
   try {
@@ -92,6 +96,7 @@ async function handleAssist(
       headers: {
         "Content-Type": "application/json",
         Accept: "text/plain",
+        ...(authorization ? { Authorization: authorization } : {}),
       },
       body: JSON.stringify({
         query: trimmed,

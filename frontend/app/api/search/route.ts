@@ -27,7 +27,7 @@ function backendUnreachable(detail: string) {
   );
 }
 
-async function forward(query: string | null) {
+async function forward(query: string | null, authorization: string | null) {
   const trimmed = (query ?? "").trim();
 
   if (!trimmed) {
@@ -37,7 +37,10 @@ async function forward(query: string | null) {
   try {
     const res = await fetch(`${BACKEND_URL}/api/search`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(authorization ? { Authorization: authorization } : {}),
+      },
       body: JSON.stringify({ query: trimmed }),
       cache: "no-store",
     });
@@ -69,10 +72,13 @@ async function forward(query: string | null) {
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  return forward(searchParams.get("q"));
+  return forward(searchParams.get("q"), request.headers.get("authorization"));
 }
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
-  return forward(body.query ?? body.q ?? null);
+  return forward(
+    body.query ?? body.q ?? null,
+    request.headers.get("authorization")
+  );
 }
