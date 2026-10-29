@@ -81,6 +81,18 @@ const AI_MAX_TOOL_ROUNDS = Math.min(
   Math.max(Number(process.env.AI_MAX_TOOL_ROUNDS || 4), 1),
   10,
 );
+// LLM EXECUTION PLAN: with this on, a multi-step question is answered from ONE
+// LLM-generated JSON plan that the backend validates and executes (instead of
+// discovering the tool calls round by round). Independent plan steps run
+// concurrently via Promise.all(). Set PLAN_EXECUTION_ENABLED=false to always
+// use the round-trip loop.
+const PLAN_EXECUTION_ENABLED =
+  String(process.env.PLAN_EXECUTION_ENABLED || "true").toLowerCase() ===
+  "true";
+const PLAN_MAX_STEPS = Math.min(
+  Math.max(Number(process.env.PLAN_MAX_STEPS || 5), 1),
+  8,
+);
 // Keeping the model resident in RAM removes the multi-second cold load on every request.
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 // A smaller context than the model default (128k) massively cuts prompt-eval time.
@@ -180,8 +192,8 @@ const EMBED_TIMEOUT_MS = Number(process.env.EMBED_TIMEOUT_MS || 15000);
 // genuine paraphrases and rejects topic neighbours.
 const SEMANTIC_MIN_SIMILARITY = Number(
   process.env.SEMANTIC_MIN_SIMILARITY ||
-    process.env.SEMANTIC_CACHE_THRESHOLD ||
-    0.8,
+  process.env.SEMANTIC_CACHE_THRESHOLD ||
+  0.8,
 );
 // Second gate on top of the similarity score: the two questions must also
 // share most of their content words. Similarity alone matches "warranty
@@ -307,18 +319,7 @@ pool.on("error", (e) => {
 // MCP tools (get_order, list_orders, check_stock, search_products, update_stock)
 // bound to THIS
 // backend's own pool — no second DB connection is opened. Same tool logic as
-// the standalone mcp/ MCP server (mcp/tools.js), shared via createTools().
-//
-// AUTH (ADDITIVE, SERVER-VERIFIED):
-//   Tool handlers now require a verified auth context. The backend acts as a
-//   trusted SERVICE using MCP_SERVICE_TOKEN from backend/.env — an opaque
-//   session token resolved against the database for EVERY tool call (so
-//   revocation or expiry takes effect without a restart). The token maps to
-//   a dedicated service account created with
-//     cd ../mcp && ADMIN_PASSWORD=... node scripts/create-admin.js \
-//       --name "OpsMate Service" --email service@opsmate.local --token --ttl-days 365
-//   Fail closed: an unset or invalid token means every tool call returns an
-//   authentication-required error instead of silently executing.
+
 const mcpTools = createTools(pool, createAuth(pool));
 
 // Resolves the service session token to a VERIFIED context { userId, role,
@@ -566,11 +567,10 @@ async function streamOllamaCompletion(
             stage: "answer",
             status: "run",
             title: "Answer streaming",
-            detail: `${ollamaModel} · first token ${firstTokenMs}ms${
-              firstToolToken
-                ? " · output cap raised for tool-grounded answer"
-                : ""
-            }`,
+            detail: `${ollamaModel} · first token ${firstTokenMs}ms${firstToolToken
+              ? " · output cap raised for tool-grounded answer"
+              : ""
+              }`,
           });
           firstToolToken = false;
         }
@@ -748,28 +748,127 @@ const POLICY_UNAVAILABLE_BLOCK =
  *            If the round budget is exhausted, one final streamed turn is
  *            forced so a tool-calling loop can never run away.
  */
-async function askOllamaWithOrderTool(
-  query,
-  { onDelta, signal, history = [], trace, context = null } = {},
-) {
+// ---- Constants ----
+const MAX_TOOL_RESULT_CHARS = 4000;
+const AI_TOTAL_TIMEOUT_MS = 60000;
+
+// ---- Helpers ----
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function getToolSchema(name) {
+  const tool = MCP_TOOLS_FOR_OLLAMA.find((t) => t?.function?.name === name);
+  return tool ? tool.function.parameters || {} : null;
+}
+
+function validateToolArgs(name, rawArgs) {
+  const schema = getToolSchema(name);
+  if (!schema) return { ok: false, error: `Unknown tool: ${name}` };
+
+  if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+    return { ok: false, error: "Arguments must be a JSON object" };
+  }
+
+  const props = schema.properties || {};
+  const required = schema.required || [];
+  const clean = {};
+
+  for (const key of Object.keys(props)) {
+    let value = rawArgs[key];
+    if (value === undefined) continue;
+
+    const expected = props[key].type;
+
+    if (expected === "integer" && typeof value === "string" && /^-?\d+$/.test(value.trim())) {
+      value = Number(value);
+    }
+
+    const ok =
+      expected === "integer" ? Number.isInteger(value)
+        : expected === "number" ? typeof value === "number" && Number.isFinite(value)
+          : expected === "string" ? typeof value === "string"
+            : expected === "boolean" ? typeof value === "boolean"
+              : expected === "array" ? Array.isArray(value)
+                : expected === "object" ? typeof value === "object" && value !== null && !Array.isArray(value)
+                  : true;
+
+    if (!ok) return { ok: false, error: `Argument "${key}" must be ${expected}` };
+    clean[key] = value;
+  }
+
+  const missing = required.filter((k) => clean[k] === undefined);
+  if (missing.length) {
+    return { ok: false, error: `Missing required argument(s): ${missing.join(", ")}` };
+  }
+  return { ok: true, args: clean };
+}
+
+function truncateResult(result, max = MAX_TOOL_RESULT_CHARS) {
+  const text = JSON.stringify(result);
+  if (text.length <= max) return result;
+  return {
+    truncated: true,
+    note: `Result cut to ${max} characters.`,
+    data: text.slice(0, max),
+  };
+}
+
+async function runOneToolCall({ name, args }, { context, signal, trace }) {
+  if (signal?.aborted) throw clientAborted();
+
+  const started = nowMs();
+  try {
+    const result = await callMcpTool(name, args, context);
+    trace?.({
+      stage: "tool",
+      status: result?.error ? "error" : "ok",
+      title: `${name} returned`,
+      detail: describeToolResult(name, result) || "ok",
+      ms: nowMs() - started,
+    });
+    return truncateResult(result);
+  } catch (error) {
+    if (signal?.aborted || error?.code === "CLIENT_ABORTED" || error?.name === "AbortError") {
+      throw clientAborted();
+    }
+    trace?.({
+      stage: "tool",
+      status: "error",
+      title: `${name} failed`,
+      detail: String(error?.message || error),
+      ms: nowMs() - started,
+    });
+    return { error: String(error?.message || error) };
+  }
+}
+
+// ---- Main function ----
+
+async function askOllamaWithOrderTool( query, { onDelta, signal, history = [], trace, context = null } = {}, ) 
+{
   const isMultiToolNeeded = queryRequiresMultiTool(query);
-  // POLICY ROUTING: a policy question gets the Company Policy Resource content
-  // (and, if it is policy-ONLY, none of the DB tools). Registration of the
-  // resource alone does not ground the model — this injection is why the
-  // answer can actually cite the resource's "14-30 days" window.
   const policyWanted = hasPolicyIntent(query);
   const policyOnly = isPolicyOnlyQuery(query);
   const policyDoc = policyWanted ? getPolicyDocument() : null;
   const maxRounds = isMultiToolNeeded ? AI_MAX_TOOL_ROUNDS : 1;
+  const deadline = nowMs() + AI_TOTAL_TIMEOUT_MS;
+
   const messages = [
     { role: "system", content: OPSMATE_SYSTEM_PROMPT },
     ...(policyWanted
-      ? [
-          {
-            role: "system",
-            content: policyDoc ? policyContextBlock(policyDoc) : POLICY_UNAVAILABLE_BLOCK,
-          },
-        ]
+      ? [{
+        role: "system",
+        content: policyDoc ? policyContextBlock(policyDoc) : POLICY_UNAVAILABLE_BLOCK,
+      }]
       : []),
     ...sanitizeHistory(history, query),
     { role: "user", content: query },
@@ -781,7 +880,12 @@ async function askOllamaWithOrderTool(
   let completedRounds = 0;
 
   for (let round = 1; round <= maxRounds; round++) {
+    if (nowMs() > deadline) {
+      trace?.({ stage: "route", status: "error", title: "Overall deadline reached" });
+      break;
+    }
     completedRounds = round;
+
     trace?.({
       stage: "route",
       title: `Round ${round}/${maxRounds}`,
@@ -792,15 +896,11 @@ async function askOllamaWithOrderTool(
           : "decision turn with MCP tools offered",
     });
 
-    // One visible trace step for the policy grounding, emitted on the first
-    // round only: the UI shows exactly whether the Resource was attached.
     if (round === 1 && policyWanted) {
       trace?.({
         stage: "policy",
         status: policyDoc ? "ok" : "error",
-        title: policyDoc
-          ? "Policy Resource context attached"
-          : "Policy Resource unavailable",
+        title: policyDoc ? "Policy Resource context attached" : "Policy Resource unavailable",
         detail: policyOnly
           ? `policy-only question · DB tools withheld · grounded from ${POLICY_RESOURCE_URI} · ${String(policyDoc || "").length} chars`
           : "mixed question · policy context + order/product tools both available",
@@ -813,11 +913,6 @@ async function askOllamaWithOrderTool(
         decisionClient.chat({
           model: ollamaModel,
           messages,
-          // POLICY-ONLY questions get NO tools at all: the answer must come
-          // from the Policy Resource context above, and withholding the DB
-          // tools makes a wasted search_products/get_order call impossible.
-          // Mixed policy+product/order questions keep all five tools and
-          // instead ground their policy part via the context injection.
           tools: policyOnly ? [] : MCP_TOOLS_FOR_OLLAMA,
           stream: false,
           keep_alive: OLLAMA_KEEP_ALIVE,
@@ -831,13 +926,7 @@ async function askOllamaWithOrderTool(
         `ollama.chat (round ${round})`,
       );
     } catch (error) {
-      // A deliberate client-side stop is not a provider failure: never flip
-      // the health flag, and let the caller report CLIENT_ABORTED instead.
-      if (
-        signal?.aborted ||
-        error?.name === "AbortError" ||
-        error?.code === "CLIENT_ABORTED"
-      ) {
+      if (signal?.aborted || error?.name === "AbortError" || error?.code === "CLIENT_ABORTED") {
         throw clientAborted();
       }
       ollamaReady = false;
@@ -845,8 +934,6 @@ async function askOllamaWithOrderTool(
       throw classifyOllamaError(error);
     }
 
-    // The client may have pressed Stop while the decision turn was in flight:
-    // stop before any tool lookup or follow-up completion is started.
     if (signal?.aborted) throw clientAborted();
 
     ollamaReady = true;
@@ -854,21 +941,12 @@ async function askOllamaWithOrderTool(
 
     const toolCalls = decision?.message?.tool_calls || [];
 
-    // No tool needed: the model answered directly — a support-policy question
-    // with no DB data attached, OR the final grounded answer after one or more
-    // earlier tool round-trips. Either way this content completes the request.
     if (!toolCalls.length) {
       const answer = String(decision?.message?.content || "").trim();
       if (!answer) {
-        // Round 1 with empty content: no fallback material at all.
-        // Later rounds: real tool results are already in context — drop into
-        // the forced streamed final turn below instead of failing the request.
-        if (!usedToolNames.length)
-          throw makeError(
-            "Ollama returned an empty response",
-            504,
-            "AI_TIMEOUT",
-          );
+        if (!usedToolNames.length) {
+          throw makeError("Ollama returned an empty response", 504, "AI_TIMEOUT");
+        }
         trace?.({
           stage: "tool",
           title: "Empty round answer",
@@ -894,108 +972,86 @@ async function askOllamaWithOrderTool(
       };
     }
 
-    // The model asked for one or more MCP tools — run EVERY one of them
-    // against the real database. This is the only place order/inventory data
-    // enters the conversation.
-    // WHICH tool the model picked (and in what order) is exactly what the
-    // trace shows: selection -> call -> result -> RESULTS BACK TO THE MODEL ->
-    // next round -> grounded answer.
-    const roundToolNames = toolCalls
-      .map((call) => call?.function?.name)
-      .filter(Boolean);
     trace?.({
       stage: "tool",
       status: "run",
       title: `Round ${round}: tool(s) selected by the model`,
-      detail: roundToolNames.join(", ") || "unnamed tool",
+      detail: toolCalls.map((c) => c?.function?.name).filter(Boolean).join(", ") || "unnamed tool",
     });
 
-    // Append the assistant's tool-call turn FIRST, then one `tool` message per
-    // result — the exact shape Ollama expects to continue a tool conversation.
     messages.push(decision.message);
 
-    for (const call of toolCalls) {
+    const plan = toolCalls.map((call) => {
       const name = call?.function?.name;
       const rawArgs = call?.function?.arguments;
-      const args =
-        typeof rawArgs === "string" ? safeJsonParse(rawArgs) : rawArgs || {};
+      const parsed = typeof rawArgs === "string" ? safeJsonParse(rawArgs) : rawArgs;
 
-      const callKey = `${name}:${JSON.stringify(args)}`;
-      if (executedCalls.has(callKey)) {
-        trace?.({
-          stage: "tool",
-          status: "skip",
-          title: `Skipping duplicate ${name}`,
-          detail: "already called in previous round with identical arguments",
-        });
-        continue;
+      const check = validateToolArgs(name, parsed);
+      if (!check.ok) {
+        trace?.({ stage: "tool", status: "error", title: `Rejected ${name || "call"}`, detail: check.error });
+        return { kind: "error", name, error: check.error };
       }
-      executedCalls.add(callKey);
 
-      trace?.({
-        stage: "tool",
-        status: "run",
-        title: `Calling ${name}`,
-        detail: formatToolArgs(args),
-      });
+      const key = `${name}:${stableStringify(check.args)}`;
+      if (executedCalls.has(key)) {
+        trace?.({ stage: "tool", status: "skip", title: `Skipping duplicate ${name}` });
+        return { kind: "skip", name };
+      }
+      executedCalls.add(key);
+      return { kind: "run", name, args: check.args };
+    });
 
-      const toolStartedAt = nowMs();
-      const result = await callMcpTool(name, args, context);
+    const toRun = plan.filter((p) => p.kind === "run");
+    const settled = await Promise.allSettled(
+      toRun.map((p) => runOneToolCall(p, { context, signal, trace })),
+    );
 
-      trace?.({
-        stage: "tool",
-        status: result?.error ? "error" : "ok",
-        title: `${name} returned`,
-        detail: describeToolResult(name, result) || "ok",
-        ms: nowMs() - toolStartedAt,
-      });
+    if (signal?.aborted) throw clientAborted();
 
-      messages.push({ role: "tool", content: JSON.stringify(result) });
+    let runIndex = 0;
+    for (const p of plan) {
+      let payload;
+      if (p.kind === "error") {
+        payload = { error: p.error };
+      } else if (p.kind === "skip") {
+        payload = { skipped: true, note: "identical call already made in an earlier step" };
+      } else {
+        const s = settled[runIndex++];
+        payload = s.status === "fulfilled"
+          ? s.value
+          : { error: String(s.reason?.message || s.reason) };
+      }
+      messages.push({ role: "tool", content: JSON.stringify(payload) });
     }
 
-    usedToolNames.push(...roundToolNames);
+    usedToolNames.push(...plan.map((p) => p.name).filter(Boolean));
 
-    // When the user's question does NOT require multi-step chaining (e.g. simple
-    // listing, single order status, product price/stock), 1 successful tool call
-    // round is completely sufficient — do not call tools multiple times.
-    if (!isMultiToolNeeded && usedToolNames.length > 0) {
-      break;
-    }
+    if (!isMultiToolNeeded && usedToolNames.length > 0) break;
   }
 
-  // Generate the final streamed answer grounded in the tool result(s).
   trace?.({
     stage: "tool",
     title: isMultiToolNeeded ? "Round budget reached" : "Tool results ready",
     detail: `${usedToolNames.length} tool result(s) in context · generating grounded answer`,
   });
+
   const final = await streamOllamaCompletion(
     [
       ...messages,
-      // Strict grounding instruction for the final turn ONLY: with a 3B model
-      // the decision turn sometimes flows straight into a next-step suggestion
-      // in the follow-up call, producing replies that contain tool data but
-      // never say it. (Observed: "list all orders" -> list_orders -> "Next
-      // step: Review the list of orders..." and nothing else.)
       {
         role: "user",
         content:
           "Now write the final answer to the customer's question. Ground it ONLY in " +
           "the tool result(s) above — every order/product value you state must come from " +
-          "those results. If the result was a list, present the actual rows (id, status " +
-          "and any field the customer asked about); never end without them, never write " +
-          "only a 'next step' suggestion, and never suggest reviewing or checking again. " +
-          "Keep it to a few short lines.",
+          "those results. If a tool returned an error, say so plainly instead of guessing. " +
+          "If the result was a list, present the actual rows (id, status and any field the " +
+          "customer asked about); never end without them, never write only a 'next step' " +
+          "suggestion, and never suggest reviewing or checking again. Keep it to a few short lines.",
       },
     ],
-    {
-      onDelta,
-      signal,
-      usedTool: true,
-      trace,
-      maxTokens: Math.max(AI_MAX_TOKENS, 400),
-    },
+    { onDelta, signal, usedTool: true, trace, maxTokens: Math.max(AI_MAX_TOKENS, 400) },
   );
+
   return {
     ...final,
     tool: usedToolNames.join(", ") || null,
@@ -1273,9 +1329,9 @@ async function lookupOrder(orderId, ownerUserId = null) {
     ownerUserId == null
       ? await pool.query("SELECT * FROM orders WHERE order_id = $1", [id])
       : await pool.query(
-          "SELECT * FROM orders WHERE order_id = $1 AND user_id = $2",
-          [id, ownerUserId],
-        );
+        "SELECT * FROM orders WHERE order_id = $1 AND user_id = $2",
+        [id, ownerUserId],
+      );
   const row = result.rows[0] || null;
   if (row) orderCache.set(cacheKey, row, ORDER_CACHE_TTL_MS);
   return row;
@@ -1556,6 +1612,576 @@ async function callMcpTool(name, args, context = null) {
     // Not JSON (e.g. a plain "Order not found: ..." message) — pass it through as-is.
     return { message: text, isError: Boolean(result?.isError) };
   }
+}
+
+// ======================================================
+// LLM-BASED EXECUTION PLAN + BACKEND VALIDATION + Promise.all() EXECUTION
+//
+// The multi round-trip loop (askOllamaWithOrderTool above) discovers tool
+// calls ONE round-trip at a time: each round is a full Ollama request whose
+// only output is the NEXT tool call(s). For a multi-step data-gathering
+// question ("check ORD-1001 and how much stock is left for each product in
+// it") those round-trips stack several seconds of model latency.
+//
+// The execution-plan flow replaces that with four backend-owned stages:
+//
+//   1. PLAN    (LLM)    one non-streaming Ollama call (format:"json") emits
+//                       the WHOLE plan up front:
+//                         {"reasoning":"...",
+//                          "steps":[{"tool":"get_order",
+//                                    "arguments":{"order_id":"ORD-1001"},
+//                                    "depends_on":[]}]}
+//   2. VALIDATE (backend) the plan is parsed with zod, every step's tool
+//                       name is checked against the tool registry, every
+//                       step's arguments are re-validated against the SAME
+//                       zod input schema the MCP server registers for that
+//                       tool (shared from ../mcp/tools.js), and the
+//                       dependency graph is checked (backwards-only edges,
+//                       dropped dependencies cascade). NOTHING the model
+//                       writes is trusted: invalid steps are dropped
+//                       individually; an all-invalid plan falls back to the
+//                       round-trip loop.
+//   3. EXECUTE          steps are grouped into topological layers: layer k
+//                       = every step whose depends_on are done. Each layer
+//                       runs as ONE await Promise.all(layer.map(...)), so
+//                       independent read-only steps execute CONCURRENTLY.
+//                       Mutating steps (update_stock) are forced to a
+//                       layer of their own, one at a time, strictly last:
+//                       mutations never run in parallel with each other.
+//   4. ANSWER   (LLM)   all step results go into the same streamed,
+//                       tool-grounded final completion the round-trip loop
+//                       produces — answers stay grounded in real MCP output.
+// ======================================================
+
+// The ONLY tools a plan step may name. The zod input schema each is checked
+// against is read straight from the MCP tool definitions (../mcp/tools.js),
+// shared with the standalone mcp/ server — so a plan step is validated
+// against the exact argument contract its MCP handler will run with.
+const PLAN_TOOL_SCHEMAS = {
+  get_order: () => mcpTools.getOrderInputSchema,
+  list_orders: () => mcpTools.listOrdersInputSchema,
+  check_stock: () => mcpTools.checkStockInputSchema,
+  search_products: () => mcpTools.searchProductsInputSchema,
+  update_stock: () => mcpTools.updateStockInputSchema,
+};
+
+// Argument reference a step may use to consume an earlier step's result,
+// e.g. "$1.0.sku" = step 1's result, take index 0, its "sku" field.
+const PLAN_ARG_REF_RE = /^\$(\d+)((?:\.[A-Za-z_0-9-]+)+)$/;
+
+// Unwraps .optional()/.default() wrappers so a numeric STRING argument can
+// be coerced into the number the tool schema wants (order_id stays a
+// string — only number-typed fields are coerced).
+function unwrapZodType(field) {
+  let f = field;
+  for (let i = 0; i < 4 && f; i++) {
+    if (f instanceof z.ZodOptional || f instanceof z.ZodDefault) {
+      f = f?._zod?.def?.innerType ?? null;
+    } else {
+      break;
+    }
+  }
+  return f;
+}
+
+// PLAN step shape emitted by the model (before backend validation).
+const planStepSchema = z.object({
+  tool: z.string().min(1),
+  arguments: z.record(z.string(), z.unknown()).optional(),
+  depends_on: z.array(z.number().int().min(0)).optional(),
+});
+
+const executionPlanSchema = z.object({
+  reasoning: z.string().optional(),
+  steps: z.array(planStepSchema).max(PLAN_MAX_STEPS),
+});
+
+/**
+ * BACKEND VALIDATION of one raw plan. Returns
+ *   { ok, steps, errors }
+ * where steps is the CLEANED, executable plan:
+ *   { index, tool, arguments, depends_on, exclusive }
+ * Steps that fail validation are dropped individually (with an error entry);
+ * a dependent of a dropped step is dropped too; ok===false only when every
+ * step failed (the caller then falls back to the round-trip loop).
+ */
+function validateExecutionPlan(rawPlan) {
+  const parsed = executionPlanSchema.safeParse(rawPlan);
+  if (!parsed.success) {
+    const firstIssue =
+      parsed.error?.issues?.[0]?.message || String(parsed.error?.message || "");
+    return { ok: false, steps: [], errors: [`plan shape rejected: ${firstIssue}`] };
+  }
+
+  const errors = [];
+  const dropped = new Set();
+
+  const cleaned = parsed.data.steps.map((rawStep, index) => {
+    const schemaFactory = PLAN_TOOL_SCHEMAS[rawStep.tool];
+    if (!schemaFactory) {
+      errors.push(`step ${index}: unknown tool "${rawStep.tool}"`);
+      dropped.add(index);
+      return null;
+    }
+
+    // Normalize args first (never trust the model's typing), THEN validate.
+    let args =
+      rawStep.arguments && typeof rawStep.arguments === "object"
+        ? { ...rawStep.arguments }
+        : {};
+
+    // Unwrap a stringified arguments object — a 3B model does this.
+    if (
+      args.arguments &&
+      typeof args.arguments === "object"
+    ) {
+      args = { ...args.arguments, ...args };
+      delete args.arguments;
+    }
+
+    // Coerce number-typed fields that arrived as numeric strings.
+    const schemaObject = schemaFactory();
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value !== "string" || !/^-?\d+$/.test(value)) continue;
+      const unwrapped = schemaObject[key]
+        ? unwrapZodType(schemaObject[key])
+        : null;
+      if (unwrapped instanceof z.ZodNumber) args[key] = Number(value);
+    }
+
+    // THE contract check: the step's arguments must satisfy the same zod
+    // schema the MCP tool registers. Reference values ("$1.0.sku") pass as
+    // strings here and are resolved (or fail) at execution time.
+    const stepValid = z.object(schemaObject).safeParse(args);
+    if (!stepValid.success) {
+      const issueText =
+        stepValid.error?.issues
+          ?.map((issue) => `${issue.path?.join(".") || "args"}: ${issue.message}`)
+          .join("; ") || "invalid arguments";
+      errors.push(`step ${index} (${rawStep.tool}): ${issueText}`);
+      dropped.add(index);
+      return null;
+    }
+
+    // Dependency edges: 0-based step positions, EARLIER steps only.
+    const dependencies = (rawStep.depends_on || []).filter((d) =>
+      Number.isInteger(d),
+    );
+    for (const d of dependencies) {
+      if (d < 0 || d >= index) {
+        errors.push(
+          `step ${index}: dependency ${d} is not an earlier step (edge ignored)`,
+        );
+      }
+    }
+    const validDeps = dependencies.filter((d) => d >= 0 && d < index);
+
+    return {
+      index,
+      tool: rawStep.tool,
+      arguments: args,
+      depends_on: validDeps,
+      // Mutations never execute inside a parallel batch: update_stock gets
+      // its own layer, alone, after everything else.
+      exclusive: rawStep.tool === "update_stock",
+    };
+  });
+
+  // A step whose dependency was dropped can never run: cascade-drop it too.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of cleaned) {
+      if (!step || dropped.has(step.index)) continue;
+      if (step.depends_on.some((d) => dropped.has(d))) {
+        dropped.add(step.index);
+        errors.push(
+          `step ${step.index} (${step.tool}): dropped because its dependency was rejected`,
+        );
+        changed = true;
+      }
+    }
+  }
+
+  const steps = cleaned.filter((step) => step && !dropped.has(step.index));
+
+  return { ok: steps.length > 0, steps, errors };
+}
+
+/**
+ * Groups validated steps into execution layers ( Kahn layering):
+ *   layer 0: all steps with no dependencies
+ *   layer k: every step whose depends_on completed in layers < k
+ * update_stock steps are appended one-per-layer STRICTLY last, so mutations
+ * never share a parallel batch with anything. Every layer is executed with
+ * await Promise.all(layer.map(...)) in executePlanSteps().
+ */
+function buildPlanLayers(steps) {
+  const exclusiveIds = new Set(
+    steps.filter((step) => step.exclusive).map((step) => step.index),
+  );
+  const readOnlyIds = new Set(
+    steps.filter((step) => !step.exclusive).map((step) => step.index),
+  );
+
+  const schedulable = steps.filter(
+    (step) =>
+      !step.exclusive &&
+      // depending on a mutation can never schedule before it -> defer
+      step.depends_on.every((d) => readOnlyIds.has(d) || !exclusiveIds.has(d)),
+  );
+  const deferredReadOnly = steps.filter(
+    (step) => !step.exclusive && !schedulable.includes(step),
+  );
+
+  const layers = [];
+  const placed = new Set();
+
+  let progress = true;
+  while (progress && placed.size < schedulable.length) {
+    progress = false;
+    const ready = schedulable.filter(
+      (step) =>
+        !placed.has(step.index) &&
+        step.depends_on.every((d) => placed.has(d) || !readOnlyIds.has(d)),
+    );
+    for (const step of ready) {
+      placed.add(step.index);
+      progress = true;
+    }
+    if (ready.length) {
+      layers.push(ready.map((step) => step.index));
+    }
+  }
+
+  // Belt-and-braces: anything unschedulable runs alone, in plan order.
+  for (const step of schedulable.filter((s) => !placed.has(s.index))) {
+    layers.push([step.index]);
+  }
+  // Mutations: strictly last, one per layer, serial.
+  for (const step of steps.filter((s) => s.exclusive)) {
+    layers.push([step.index]);
+  }
+  // Read-only steps that depended on a mutation: after it, one per layer.
+  for (const step of deferredReadOnly) {
+    layers.push([step.index]);
+  }
+
+  return layers;
+}
+
+/**
+ * Resolves "$<step>.<field...>" references in a step's arguments against
+ * COMPLETED step results. An unresolvable reference fails the step with a
+ * clear error instead of sending a literal "$1.sku" to Postgres.
+ */
+function resolvePlanArguments(step, completedResults) {
+  const resolvedArgs = {};
+
+  for (const [key, rawValue] of Object.entries(step.arguments || {})) {
+    let value = rawValue;
+
+    if (typeof value === "string") {
+      const match = value.match(PLAN_ARG_REF_RE);
+      if (match) {
+        const sourceStep = Number(match[1]);
+        const source = completedResults.get(sourceStep);
+        if (source === undefined) {
+          return {
+            args: null,
+            error: `argument ${key} references step ${sourceStep} which has no completed result`,
+          };
+        }
+        let node = source;
+        for (const part of match[2].slice(1).split(".")) {
+          if (Array.isArray(node)) {
+            const i = Number(part);
+            if (!Number.isInteger(i) || i < 0 || i >= node.length) {
+              node = undefined;
+              break;
+            }
+            node = node[i];
+          } else if (node && typeof node === "object") {
+            node = node[part];
+          } else {
+            node = undefined;
+            break;
+          }
+        }
+        if (node === undefined || node === null) {
+          return {
+            args: null,
+            error: `argument ${key} references step ${sourceStep} result path ${match[2].slice(1)} which was empty`,
+          };
+        }
+        value = node;
+      }
+    }
+
+    resolvedArgs[key] = value;
+  }
+
+  return { args: resolvedArgs, error: null };
+}
+
+/**
+ * Executes a VALIDATED plan. async/await throughout; each dependency layer
+ * runs concurrently via Promise.all(). Never throws per step: a failing
+ * step yields { error } for the model to see. Returns the per-step results.
+ */
+async function executePlanSteps(steps, context, trace) {
+  const layers = buildPlanLayers(steps);
+  const completedResults = new Map(); // step index -> result
+
+  for (let layerIdx = 0; layerIdx < layers.length; layerIdx++) {
+    const layer = layers[layerIdx];
+
+    trace?.({
+      stage: "plan",
+      status: "run",
+      title: `Layer ${layerIdx + 1}/${layers.length}`,
+      detail:
+        layer.map((i) => steps.find((s) => s.index === i)?.tool || i).join(", ") +
+        (layer.length > 1 ? " · Promise.all() parallel" : " · serial"),
+    });
+
+    const layerStartedAt = nowMs();
+
+    // THE parallel round: every independent step of this layer runs at the
+    // same time. callMcpTool() never throws, so Promise.all cannot reject.
+    const batch = await Promise.all(
+      layer.map(async (stepIndex) => {
+        const step = steps.find((s) => s.index === stepIndex);
+        if (!step) {
+          return { stepIndex, result: { error: "plan step not found" }, ms: 0 };
+        }
+
+        const { args, error: resolveError } = resolvePlanArguments(
+          step,
+          completedResults,
+        );
+        if (resolveError) {
+          return { stepIndex, result: { error: resolveError }, ms: 0 };
+        }
+
+        const stepStartedAt = nowMs();
+        const result = await callMcpTool(step.tool, args, context);
+        return { stepIndex, result, ms: Number((nowMs() - stepStartedAt).toFixed(1)) };
+      }),
+    );
+
+    for (const { stepIndex, result, ms } of batch) {
+      completedResults.set(stepIndex, result);
+      const step = steps.find((s) => s.index === stepIndex);
+      trace?.({
+        stage: "tool",
+        status: result?.error || result?.isError ? "error" : "ok",
+        title: `${step?.tool || stepIndex} returned (plan layer ${layerIdx + 1})`,
+        detail: describeToolResult(step?.tool || "", result) || "ok",
+        ms,
+      });
+    }
+
+    trace?.({
+      stage: "plan",
+      title: `Layer ${layerIdx + 1}/${layers.length} complete`,
+      detail: `${batch.length} step(s) · ${Number((nowMs() - layerStartedAt).toFixed(1))}ms`,
+      ms: Number((nowMs() - layerStartedAt).toFixed(1)),
+    });
+  }
+
+  return completedResults;
+}
+
+// The PLAN system prompt: the model's only job here is to emit the JSON
+// plan, not the answer.
+const PLAN_SYSTEM_PROMPT = `You are the planning module of OpsMate, an e-commerce support assistant.
+Your ONLY output is a JSON execution plan for database lookups. Do NOT answer
+the question itself in this turn.
+
+Return STRICT JSON, no markdown fences, no prose, shaped exactly:
+{"reasoning": "one short sentence", "steps": [
+  {"tool": "<tool name>", "arguments": {..}, "depends_on": [<0-based positions of earlier steps you need>]}
+]}
+
+Tools available for steps: get_order(order_id), list_orders(status?, limit?),
+check_stock(sku), search_products(query, limit?).
+
+Rules:
+- steps is executed in the listed order; positions are 0-based indexes into that list.
+- Use "$<position>.<fieldpath>" as an argument value to consume an earlier step's result, e.g. "$0.0.sku" = step 0's result, first row, sku field.
+- Put EVERY independent lookup into the plan as its own step. Independent steps run in parallel.
+- search_products first when an item is named without a SKU; the stock check depends on it.
+- NEVER include update_stock or any write unless the user EXPLICITLY asks for a stock change.
+- At most ${PLAN_MAX_STEPS} steps. If no tool is needed at all, return {"reasoning":"no tools needed","steps":[]}.
+`;
+
+/**
+ * PLAN entry point for generateAnswer():
+ *   plan -> validate -> execute (Promise.all layers) -> streamed grounded answer
+ * Resolves to null when the planner is disabled, not applicable, the model
+ * produced no plan, or the entire plan failed validation — the caller then
+ * falls back to the multi round-trip loop unchanged.
+ */
+async function planAndExecuteQuery(
+  query,
+  { onDelta, signal, history = [], trace, context = null } = {},
+) {
+  const planningStartedAt = nowMs();
+
+  trace?.({
+    stage: "route",
+    title: "Execution plan",
+    detail: "LLM plans all tool calls up front · backend validates · parallel execution",
+  });
+
+  const decisionClient = ollamaClientFor(signal);
+
+  let decision;
+  try {
+    decision = await withTimeout(
+      decisionClient.chat({
+        model: ollamaModel,
+        messages: [
+          { role: "system", content: PLAN_SYSTEM_PROMPT },
+          ...sanitizeHistory(history, query),
+          { role: "user", content: query },
+        ],
+        format: "json", // hard-guarantees a parseable JSON object
+        stream: false,
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        options: {
+          temperature: OLLAMA_TEMPERATURE,
+          num_predict: 300,
+          num_ctx: OLLAMA_NUM_CTX,
+        },
+      }),
+      AI_REQUEST_TIMEOUT_MS,
+      "ollama.chat (plan)",
+    );
+  } catch (error) {
+    if (
+      signal?.aborted ||
+      error?.name === "AbortError" ||
+      error?.code === "CLIENT_ABORTED"
+    ) {
+      throw clientAborted();
+    }
+    trace?.({
+      stage: "plan",
+      status: "error",
+      title: "Planner call failed",
+      detail: `falling back to round-trip loop · ${String(error?.message || error).slice(0, 120)}`,
+    });
+    return null;
+  }
+
+  if (signal?.aborted) throw clientAborted();
+
+  ollamaReady = true;
+  ollamaLastError = null;
+
+  // ---------- 2. BACKEND VALIDATION ----------
+  let rawPlan;
+  try {
+    rawPlan = JSON.parse(decision?.message?.content || "");
+  } catch (_e) {
+    trace?.({
+      stage: "plan",
+      status: "error",
+      title: "Plan not valid JSON",
+      detail: "falling back to round-trip loop",
+    });
+    return null;
+  }
+
+  const plan = validateExecutionPlan(rawPlan);
+  for (const message of plan.errors.slice(0, 5)) {
+    trace?.({
+      stage: "plan",
+      status: plan.ok ? "ok" : "error",
+      title: "Plan validation",
+      detail: message,
+    });
+  }
+
+  if (!plan.ok) {
+    trace?.({
+      stage: "plan",
+      status: "error",
+      title: "Plan rejected",
+      detail: "no valid steps · falling back to round-trip loop",
+    });
+    return null;
+  }
+
+  trace?.({
+    stage: "plan",
+    title: `Plan validated: ${plan.steps.length} step(s)`,
+    detail: plan.steps
+      .map(
+        (step) =>
+          `${step.index}:${step.tool}${Object.keys(step.arguments).length ? `(${formatToolArgs(step.arguments)})` : ""}`,
+      )
+      .join(" → ") +
+      ` · ${String(rawPlan?.reasoning || "").slice(0, 80)}`,
+    ms: Number((nowMs() - planningStartedAt).toFixed(1)),
+  });
+
+  // ---------- 3. EXECUTE (Promise.all per dependency layer) ----------
+  const stepOutputs = await executePlanSteps(plan.steps, context, trace);
+
+  // ---------- 4. FINAL GROUNDED ANSWER ----------
+  const final = await streamOllamaCompletion(
+    [
+      { role: "system", content: OPSMATE_SYSTEM_PROMPT },
+      ...sanitizeHistory(history, query),
+      { role: "user", content: query },
+      {
+        role: "system",
+        content:
+          "EXECUTION PLAN RESULTS — real MCP tool output for this question. " +
+          "Every order/product value you state MUST come from these results; " +
+          "if a step returned an error, say that plainly instead of guessing:\n" +
+          plan.steps
+            .map(
+              (step) =>
+                `step ${step.index} (${step.tool}): ` +
+                JSON.stringify(stepOutputs.get(step.index) ?? { error: "no result" }),
+            )
+            .join("\n"),
+      },
+      // Same strict grounding instruction as the round-trip loop's final turn.
+      {
+        role: "user",
+        content:
+          "Now write the final answer to the customer's question. Ground it ONLY in " +
+          "the tool result(s) above — every order/product value you state must come from " +
+          "those results. If the result was a list, present the actual rows (id, status " +
+          "and any field the customer asked about); never end without them, never write " +
+          "only a 'next step' suggestion, and never suggest reviewing or checking again. " +
+          "Keep it to a few short lines.",
+      },
+    ],
+    {
+      onDelta,
+      signal,
+      usedTool: true,
+      trace,
+      maxTokens: Math.max(AI_MAX_TOKENS, 400),
+    },
+  );
+
+  return {
+    ...final,
+    tool: plan.steps.map((step) => step.tool).join(", "),
+    rounds: 1,
+    executionPlan: {
+      tools: plan.steps.map((step) => `${step.index}:${step.tool}`),
+      validationErrors: plan.errors,
+      layerCount: buildPlanLayers(plan.steps).length,
+    },
+  };
 }
 
 // ======================================================
@@ -1940,7 +2566,7 @@ function createCacheManager({ pool, promptVersion, logger = console }) {
              latency_ms = EXCLUDED.latency_ms`,
         [query, answer, model, latencyMs ?? null],
       )
-      .catch(() => {});
+      .catch(() => { });
   }
 
   const hitResult = (row, layer, lookupMs) => ({
@@ -2520,9 +3146,9 @@ async function generateAnswer(
     if (order !== undefined) {
       const status = order
         ? String(
-            pick(order, "fulfillment_status", "status", "order_status") ||
-              "unknown",
-          ).toUpperCase()
+          pick(order, "fulfillment_status", "status", "order_status") ||
+          "unknown",
+        ).toUpperCase()
         : null;
 
       trace?.({
@@ -2550,6 +3176,27 @@ async function generateAnswer(
     // order lookup itself failed (DB down) — fall through to the tool path,
     // which will hit the same failure and surface it through the MCP tool's
     // { error: ... } shape instead of silently guessing.
+  }
+
+  // LLM EXECUTION PLAN: multi-step data-gathering questions are answered
+  // through one LLM-planned, backend-validated, Promise.all-parallel tool
+  // execution instead of stacking full Ollama round-trips. Anything the
+  // planner is refused for — disabled, a policy-only question (tools must
+  // stay withheld), or an invalid/empty plan — falls through to the proven
+  // multi round-trip loop below unchanged.
+  if (
+    PLAN_EXECUTION_ENABLED &&
+    queryRequiresMultiTool(query) &&
+    !isPolicyOnlyQuery(query)
+  ) {
+    const planned = await planAndExecuteQuery(query, {
+      onDelta,
+      history,
+      signal,
+      trace,
+      context,
+    });
+    if (planned) return planned;
   }
 
   return askOllamaWithOrderTool(query, {
@@ -2691,8 +3338,7 @@ const answerQuery = (query, opts) => {
   return cacheManager.resolve(
     // Keep cached answers scoped to the caller's identity AND their
     // conversation context (previous 3 requests).
-    `${
-      opts?.context ? `user:${opts.context.userId}` : "anon"
+    `${opts?.context ? `user:${opts.context.userId}` : "anon"
     }::${query}${historyFp ? `::ctx${historyFp}` : ""}`,
     (onDelta) =>
       generateAnswer(
@@ -3576,7 +4222,7 @@ async function handleAssist(query, body, res, context = null) {
   const trace = createTracer({
     onEvent: STREAM_TRACE_ENABLED
       ? (event) =>
-          write(`${STREAM_TRACE_PREFIX}${JSON.stringify(event)}\n`)
+        write(`${STREAM_TRACE_PREFIX}${JSON.stringify(event)}\n`)
       : undefined,
   });
 

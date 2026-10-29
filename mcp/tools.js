@@ -1,10 +1,11 @@
 const { z } = require('zod');
 const { createAuth, AuthError, ForbiddenError } = require('./auth');
+//in this file we are importing the zod library and the createAuth, AuthError, and ForbiddenError functions from the auth.js file. The zod library is used for input validation and schema definition. The createAuth function is used to create an authentication object that handles user authentication and authorization. The AuthError and ForbiddenError classes are custom error types that are thrown when authentication or authorization fails.
 
 // --------------------------------------------------
 // Input sanitizer
 // --------------------------------------------------
-function sanitizeString(value) {
+function sanitizeString(value) {    // aa function sanitizeString() string ne sanitize kare chhe. aa function ma value parameter pass thay chhe. je string ne sanitize karva mate use thay chhe. sanitize atle string ma thi unwanted characters ne remove karvu. aa function ma check thay chhe ke value string chhe ke nahi. jo value string nathi to e value return kare chhe. ane jo value string hoy to e value ne trim() method thi whitespace remove kare chhe. ane colonMatch variable ma regex match kare chhe je string ma thi unwanted prefix ne remove kare chhe. ane last ma surrounding single or double quotes ne remove kare chhe. ane finally sanitized string return kare chhe. example: "sku: SKU-001" ne sanitize karva pachi "SKU-001" return thay chhe.
   if (typeof value !== 'string') return value;
 
   let v = value.trim();
@@ -47,16 +48,14 @@ const errResult = (text) => ({
 // Over Streamable HTTP this is DISABLED; identity comes per request from the
 // Authorization: Bearer token.
 // --------------------------------------------------
-const sessionState = {
+const sessionState = {  
   rawToken: null,
 };
 
-// --------------------------------------------------
-// Tool descriptions
-// These help an LLM-powered MCP client understand
-// when each tool should be selected.
-// --------------------------------------------------
 
+
+// -------------------------------------------------- 
+// Tools descriptions
 const getOrderDescription = `
 Retrieve complete details for one specific order using its exact business order ID.
 
@@ -453,9 +452,9 @@ const loginInputSchema = {
     .describe('Password of the account.'),
 };
 
-const logoutInputSchema = {};
+const logoutInputSchema = {}; 
 
-const whoamiInputSchema = {};
+const whoamiInputSchema = {}; // This tool takes no arguments; it only reports the current session context.
 
 // --------------------------------------------------
 // Authorization guards
@@ -465,7 +464,7 @@ const whoamiInputSchema = {};
 // DB-backed session - never from tool arguments.
 // --------------------------------------------------
 
-function guardAuth(auth, context) {
+function guardAuth(auth, context) { //aa function guardAuth() authentication check kare chhe.
   try {
     auth.requireAuth(context);
     return null;
@@ -479,7 +478,7 @@ function guardAuth(auth, context) {
   }
 }
 
-function guardAdmin(auth, context) {
+function guardAdmin(auth, context) {  // aa function guardAdmin() authorization check kare chhe ke user admin chhe ke nahi.
   try {
     auth.requireAdmin(context);
     return null;
@@ -503,21 +502,21 @@ function guardAdmin(auth, context) {
 // --------------------------------------------------
 
 function createTools(pool, providedAuth) {
-  const auth = providedAuth || createAuth(pool);
+  const auth = providedAuth || createAuth(pool); 
 
   // Get one order and its line items.
   // Users: SQL enforces `user_id = own id`. Admins: any order.
   // Missing AND not-owned look identical ("Order not found") so the tool
   // never reveals whether another user's order exists (IDOR defense).
-  async function getOrderHandler(args, context) {
-    const denied = guardAuth(auth, context);
+  async function getOrderHandler(args, context) { // args has a order
+    const denied = guardAuth(auth, context); //
     if (denied) return denied;
 
     order_id = sanitizeString(args.order_id);
 
-    const scope = auth.orderScope(context);
+    const scope = auth.orderScope(context); 
 
-    const params = [order_id];
+    const params = [order_id]; 
     let sql = `
       SELECT id, order_id, customer_name, status, total_amount, created_at, user_id
       FROM orders
@@ -560,40 +559,49 @@ function createTools(pool, providedAuth) {
   // NEVER see other users' orders, no matter what status/limit/offset they
   // pass. Admins see everything, including legacy orders with owner NULL.
   async function listOrdersHandler(args, context) {
-    const denied = guardAuth(auth, context);
-    if (denied) return denied;
+        // 1. Check whether user is logged in
+        const denied = guardAuth(auth, context);
+        if (denied) return denied;
 
-    const scope = auth.orderScope(context);
+        // 2. Decide which orders the user can see
+        const scope = auth.orderScope(context);
 
-    const maxRows = args.limit || 20;
-    const skip = args.offset || 0;
-    const cleanStatus = args.status ? sanitizeString(args.status) : null;
+        // 3. Get optional filters from user
+        const maxRows = args.limit || 20;
+        const skip = args.offset || 0;
+        const cleanStatus = args.status ? sanitizeString(args.status) : null;
 
-    const params = [];
-    const where = [];
+        // 4. Prepare SQL conditions
+        const params = [];
+        const where = [];
 
-    if (scope.scope === 'own') {
-      params.push(scope.ownerUserId);
-      where.push(`user_id = $${params.length}`);
-    }
-    if (cleanStatus) {
-      params.push(cleanStatus);
-      where.push(`status = $${params.length}`);
-    }
+        // 5. Normal user can see only their own orders
+        if (scope.scope === 'own') {
+          params.push(scope.ownerUserId);
+          where.push(`user_id = $${params.length}`);
+        }
 
-    const sql = `
-      SELECT order_id, customer_name, status, total_amount, created_at
-      FROM orders
-      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY created_at DESC, id DESC
-      LIMIT ${Number(maxRows)} OFFSET ${Number(skip)}
-    `;
+        // 6. If status is provided, filter by status too
+        if (cleanStatus) {
+          params.push(cleanStatus);
+          where.push(`status = $${params.length}`);
+        }
 
-    const result = await pool.query(sql, params);
+        // 7. Build SQL query
+        const sql = `
+          SELECT order_id, customer_name, status, total_amount, created_at
+          FROM orders
+          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${Number(maxRows)} OFFSET ${Number(skip)}
+        `;
 
-    return okResult(JSON.stringify(result.rows, null, 2));
+        // 8. Execute query
+        const result = await pool.query(sql, params);
+
+        // 9. Return orders
+        return okResult(JSON.stringify(result.rows, null, 2));
   }
-
   // Create an order for the authenticated user with transactional stock
   // reservation. Prices always come from the database, never from arguments.
   async function createOrderHandler(args, context) {
@@ -666,9 +674,7 @@ function createTools(pool, providedAuth) {
 
         // Trusted total from DB prices.
         const total = skus.reduce(
-          (sum, sku) => sum + Number(rows.get(sku).price) * wanted.get(sku),
-          0
-        );
+          (sum, sku) => sum + Number(rows.get(sku).price) * wanted.get(sku),0);
 
         // Deduct stock with an in-SQL guard against overselling races.
         for (const sku of skus) {
@@ -777,8 +783,9 @@ function createTools(pool, providedAuth) {
     return okResult(JSON.stringify(result.rows, null, 2));
   }
 
+  
   // Check stock for an exact SKU (any authenticated user).
-  async function checkStockHandler(args, context) {
+  async function checkStockHandler(args, context) { 
     const denied = guardAuth(auth, context);
     if (denied) return denied;
 
@@ -857,8 +864,9 @@ function createTools(pool, providedAuth) {
   }
 
   // ADMIN-ONLY stock change with signed quantity.
-  async function updateStockHandler(args, context) {
-    const denied = guardAdmin(auth, context);
+  async function updateStockHandler(args, context) { 
+
+    const denied = guardAdmin(auth, context);  //guardAdmin() function call kare chhe je check kare chhe ke user admin chhe ke nahi. jo user admin nathi to e permission denied error return kare chhe.
     if (denied) return denied;
 
     const sku = sanitizeString(args.sku);

@@ -37,16 +37,11 @@ const auth = createAuth(pool); // aa line run krvathi auth.js file mathi jetla f
 const tools = createTools(pool, auth); // aa line run krvathi tools.js file mathi jetla function return thay chhe e badha tools object ma store thay chhe.
 
 async function resolveStdioContext() {
-  // Priority: explicit env token first so a configured token always wins,
-  // then the in-process login session.
-  const rawToken =
-    (typeof process.env.MCP_AUTH_TOKEN === 'string' && process.env.MCP_AUTH_TOKEN.trim()) ||
-    tools.getActiveTokenRaw();
+  const rawToken = (typeof process.env.MCP_AUTH_TOKEN === 'string' && process.env.MCP_AUTH_TOKEN.trim()) || tools.getActiveTokenRaw();
 
   if (rawToken) {
     return await auth.resolveSessionToken(rawToken);
   }
-
   return null;
 }
 

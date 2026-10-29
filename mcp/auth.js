@@ -23,7 +23,7 @@ const BCRYPT_COST = 12;
 
 // Session duration, configurable, default 24 hours.
 function sessionTtlMs() {
-  const hours = Number(process.env.MCP_SESSION_TTL_HOURS || 24);
+  const hours = Number(24);
   // Reject nonsense values so a typo cannot create billion-year tokens.
   if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 90) {
     throw new Error('MCP_SESSION_TTL_HOURS must be a positive number up to 90 days');
@@ -169,14 +169,14 @@ function createAuth(pool) {
 
   // Resolves a raw token to a verified context, or null.
   // This is the ONLY way a tool handler can receive an identity.
-  async function resolveSessionToken(token) {
+  async function resolveSessionToken(token) { // aa function resolveSessionToken() function chhe je session token ne verify kare chhe ane user context return kare chhe. aa function ma token parameter pass thay chhe. jo token valid nathi to e null return kare chhe. jo token valid hoy to e user context return kare chhe je ma userId, name, email, role store thay chhe. 
     if (typeof token !== 'string' || token.length < 10 || token.length > 256) {
       return null;
     }
 
     try {
-          const result = await pool.query(
-            `SELECT u.id, u.name, u.email, u.role
+          const result = await pool.query( 
+            `SELECT u.id, u.name, u.email, u.role 
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = $1
@@ -203,7 +203,7 @@ function createAuth(pool) {
 
   // Logout: delete the session row for this raw token if it belongs to the
   // resolved user. Returns true when a session was actually ended.
-  async function expireSession(context, token) {
+  async function expireSession(context, token) { 
     if (!context || typeof token !== 'string') return false;
 
     try {
@@ -226,20 +226,17 @@ function createAuth(pool) {
 
   // Throws unless the context is a fully verified identity.
   function requireAuth(context) {
-    if (
-      !context ||
-      !Number.isInteger(context.userId) ||
-      (context.role !== 'user' && context.role !== 'admin')
+    if ( !context || !Number.isInteger(context.userId) || (context.role !== 'user' && context.role !== 'admin')
     ) {
       throw new AuthError(
         'Authentication required. Configure MCP_AUTH_TOKEN for stdio clients or send a valid Authorization: Bearer token over HTTP.'
       );
     }
-    return context;
+    return context;  //store in context variable je ma userId, name, email, role store thay chhe. aa function requireAuth() call thay chhe to e check kare chhe ke user authenticated chhe ke nahi. jo user authenticated nathi to e AuthError throw kare chhe ane error message return kare chhe. jo user authenticated hoy to e context return kare chhe.
   }
 
   // Throws unless the context is a verified admin.
-  function requireAdmin(context) {
+  function requireAdmin(context) { // context stores feild like userId, name, email, role. aa function requireAdmin() check kare chhe ke context.role admin chhe ke nahi. jo context.role admin nathi to e ForbiddenError throw kare chhe. ane error message return kare chhe.
     requireAuth(context);
     if (context.role !== 'admin') {
       throw new ForbiddenError('Permission denied: this action requires administrator privileges.');
@@ -247,11 +244,11 @@ function createAuth(pool) {
     return context;
   }
 
-  // For order ownership queries: users are constrained to their own rows in
-  // the SQL itself via (user_id = $n); admin passes no constraint. Returns
+
   // { constraint: 'own'|'all', ownerUserId }.
-  function orderScope(context) {
-    requireAuth(context);
+  function orderScope(context) { // 
+    requireAuth(context); // requireAuth(context) call thay chhe. je check kare chhe ke user authenticated chhe ke nahi. 
+
     return context.role === 'admin'
       ? { scope: 'all', ownerUserId: null }
       : { scope: 'own', ownerUserId: context.userId };
